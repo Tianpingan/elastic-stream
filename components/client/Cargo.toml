@@ -21,12 +21,15 @@ flatbuffers = { workspace = true }
 gethostname = { workspace = true }
 ordinal = { workspace = true }
 tokio-uring = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true,features = ["full"]}
 crossbeam = { workspace = true }
 observation = {path = "../observation"}
-
+jni = "0.21.1"
 [dev-dependencies]
 mockall = { workspace = true }
 util = { path = "../util" }
 test-util = { path = "../test-util" }
 cargo-llvm-cov = { workspace = true }
+
+[lib]
+crate-type = ["dylib"]
