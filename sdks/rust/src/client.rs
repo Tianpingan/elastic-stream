@@ -7,7 +7,13 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn new() -> Self {
+        Client {
+            session_manager: SessionManager::new().unwrap(),
+        }
+    }
     pub async fn create_stream(&self) -> Result<StreamMetadata, ClientError> {
+        println!("create_stream()");
         self.session_manager.create_stream().await
     }
 }

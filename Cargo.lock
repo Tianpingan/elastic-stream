@@ -1001,6 +1001,7 @@ dependencies = [
  "log",
  "minitrace",
  "model",
+ "num_cpus",
  "protocol",
  "test-util",
  "thiserror",
