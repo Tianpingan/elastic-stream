@@ -3,6 +3,7 @@ mod channel_writer;
 mod client;
 mod client_builder;
 mod client_error;
+pub mod client_jni;
 mod command;
 pub(crate) mod io;
 pub mod node;
