@@ -1,4 +1,4 @@
-use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JValue, JValueGen};
+use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue, JValueGen};
 use jni::sys::{jint, jlong, JNINativeInterface_, JNI_VERSION_1_8};
 use jni::{JNIEnv, JavaVM};
 use std::cell::{OnceCell, RefCell};
@@ -6,10 +6,11 @@ use std::ffi::c_void;
 use std::io::IoSlice;
 use std::slice::from_raw_parts;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::runtime::{Builder, Runtime};
 
-use crate::{Stream, StreamManager, StreamOptions};
+use crate::{Frontend, Stream, StreamOptions};
 
 static mut RUNTIME: OnceCell<Runtime> = OnceCell::new();
 
@@ -63,40 +64,56 @@ pub unsafe extern "system" fn JNI_OnUnload(_: JavaVM, _: *mut c_void) {
     }
 }
 
-// StreamManager
+// Frontend
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_StreamManager_getStreamManager(
-    _env: JNIEnv,
+pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Frontend_getFrontend(
+    mut env: JNIEnv,
     _class: JClass,
+    access_point: JString,
 ) -> jlong {
-    let stream_manager = StreamManager::new("test");
-    Box::into_raw(Box::new(stream_manager)) as jlong
+    let access_point: String = env.get_string(&access_point).unwrap().into();
+    let result = Frontend::new(&access_point);
+    match result {
+        Ok(frontend) => Box::into_raw(Box::new(frontend)) as jlong,
+        Err(err) => {
+            let _ = env.exception_clear();
+            env.throw_new("java/lang/Exception", err.to_string())
+                .expect("Couldn't throw exception");
+            0
+        }
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_StreamManager_freeStreamManager(
+pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Frontend_freeFrontend(
     mut _env: JNIEnv,
     _class: JClass,
-    ptr: *mut StreamManager,
+    ptr: *mut Frontend,
 ) {
     // Take ownership of the pointer by wrapping it with a Box
     let _ = Box::from_raw(ptr);
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_StreamManager_create(
+pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Frontend_create(
     env: JNIEnv,
     _class: JClass,
-    ptr: *mut StreamManager,
+    ptr: *mut Frontend,
     replica: jint,
+    ack: jint,
+    retention_millis: jlong,
     future: JObject,
 ) {
-    let stream_manager = &mut *ptr;
-    let options = StreamOptions::new(replica.try_into().unwrap());
+    let front_end = &mut *ptr;
+    let options = StreamOptions::new(
+        replica.try_into().unwrap(),
+        ack.try_into().unwrap(),
+        Duration::from_millis(retention_millis.try_into().unwrap()),
+    );
     let future = env.new_global_ref(future).unwrap();
     RUNTIME.get().unwrap().spawn(async move {
-        let result = stream_manager.create(options).await;
+        let result = front_end.create(options).await;
         match result {
             Ok(stream) => {
                 let ptr = Box::into_raw(Box::new(stream)) as jlong;
@@ -112,46 +129,41 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_StreamManager_create(
             Err(err) => {
                 JENV.with(|cell| {
                     let mut env = get_thread_local_jenv(cell);
-                    call_future_complete_exceptionally_method(
-                        &mut env,
-                        future,
-                        "a demo exception for test".to_string(),
-                    );
+                    call_future_complete_exceptionally_method(&mut env, future, err.to_string());
                 });
             }
         };
     });
 }
 #[no_mangle]
-pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_StreamManager_open(
-    mut env: JNIEnv,
+pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Frontend_open(
+    env: JNIEnv,
     _class: JClass,
-    ptr: *mut StreamManager,
+    ptr: *mut Frontend,
     id: jlong,
     future: JObject,
 ) {
-    let stream_manager = &mut *ptr;
+    let front_end = &mut *ptr;
     let future = env.new_global_ref(future).unwrap();
     RUNTIME.get().unwrap().spawn(async move {
-        let result = stream_manager.open(id).await;
+        let result = front_end.open(id).await;
         match result {
             Ok(stream) => {
+                let ptr = Box::into_raw(Box::new(stream)) as jlong;
                 JENV.with(|cell| {
-                    let ptr = Box::into_raw(Box::new(stream)) as jlong;
-                    let env_ptr = cell.borrow().unwrap();
-                    let mut env = JNIEnv::from_raw(env_ptr).unwrap();
+                    let mut env = get_thread_local_jenv(cell);
                     let stream_class = env.find_class("sdk/elastic/stream/jni/Stream").unwrap();
                     let obj = env
                         .new_object(stream_class, "(J)V", &[jni::objects::JValueGen::Long(ptr)])
                         .unwrap();
-                    let s = JValueGen::from(obj);
-                    let _ = env
-                        .call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()])
-                        .unwrap();
+                    call_future_complete_method(env, future, obj);
                 });
             }
-            Err(_) => {
-                todo!();
+            Err(err) => {
+                JENV.with(|cell| {
+                    let mut env = get_thread_local_jenv(cell);
+                    call_future_complete_exceptionally_method(&mut env, future, err.to_string());
+                });
             }
         };
     });
@@ -161,7 +173,7 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_StreamManager_open(
 
 #[no_mangle]
 pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Stream_freeStream(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     ptr: *mut Stream,
 ) {
@@ -183,20 +195,20 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Stream_minOffset(
         match result {
             Ok(offset) => {
                 JENV.with(|cell| {
-                    let env_ptr = cell.borrow().unwrap();
-                    let mut env = JNIEnv::from_raw(env_ptr).unwrap();
+                    let mut env = get_thread_local_jenv(cell);
+
                     let long_class = env.find_class("java/lang/Long").unwrap();
                     let obj = env
                         .new_object(long_class, "(J)V", &[jni::objects::JValueGen::Long(offset)])
                         .unwrap();
-                    let s = JValueGen::from(obj);
-                    let _ = env
-                        .call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()])
-                        .unwrap();
+                    call_future_complete_method(env, future, obj);
                 });
             }
-            Err(_) => {
-                todo!();
+            Err(err) => {
+                JENV.with(|cell| {
+                    let mut env = get_thread_local_jenv(cell);
+                    call_future_complete_exceptionally_method(&mut env, future, err.to_string());
+                });
             }
         };
     });
@@ -216,20 +228,19 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Stream_maxOffset(
         match result {
             Ok(offset) => {
                 JENV.with(|cell| {
-                    let env_ptr = cell.borrow().unwrap();
-                    let mut env = JNIEnv::from_raw(env_ptr).unwrap();
+                    let mut env = get_thread_local_jenv(cell);
                     let long_class = env.find_class("java/lang/Long").unwrap();
                     let obj = env
                         .new_object(long_class, "(J)V", &[jni::objects::JValueGen::Long(offset)])
                         .unwrap();
-                    let s = JValueGen::from(obj);
-                    let _ = env
-                        .call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()])
-                        .unwrap();
+                    call_future_complete_method(env, future, obj);
                 });
             }
-            Err(_) => {
-                todo!();
+            Err(err) => {
+                JENV.with(|cell| {
+                    let mut env = get_thread_local_jenv(cell);
+                    call_future_complete_exceptionally_method(&mut env, future, err.to_string());
+                });
             }
         };
     });
@@ -246,18 +257,17 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Stream_append(
     let stream = &mut *ptr;
     let future = env.new_global_ref(future).unwrap();
     let array = env
-        .get_array_elements(&data, jni::objects::ReleaseMode::NoCopyBack)
+        .get_array_elements(&data, jni::objects::ReleaseMode::CopyBack)
         .unwrap();
     let len = env.get_array_length(&data).unwrap();
-    let slice = unsafe { from_raw_parts(array.as_ptr() as *mut u8, len.try_into().unwrap()) };
+    let slice = from_raw_parts(array.as_ptr() as *mut u8, len.try_into().unwrap());
     RUNTIME.get().unwrap().spawn(async move {
         let result = stream.append(IoSlice::new(slice)).await;
         match result {
             Ok(result) => {
                 let base_offset = result.base_offset;
                 JENV.with(|cell| {
-                    let env_ptr = cell.borrow().unwrap();
-                    let mut env = JNIEnv::from_raw(env_ptr).unwrap();
+                    let mut env = get_thread_local_jenv(cell);
                     let long_class = env.find_class("java/lang/Long").unwrap();
                     let obj = env
                         .new_object(
@@ -266,14 +276,14 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Stream_append(
                             &[jni::objects::JValueGen::Long(base_offset)],
                         )
                         .unwrap();
-                    let s = JValueGen::from(obj);
-                    let _ = env
-                        .call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()])
-                        .unwrap();
+                    call_future_complete_method(env, future, obj);
                 });
             }
-            Err(_) => {
-                todo!();
+            Err(err) => {
+                JENV.with(|cell| {
+                    let mut env = get_thread_local_jenv(cell);
+                    call_future_complete_exceptionally_method(&mut env, future, err.to_string());
+                });
             }
         };
     });
@@ -297,17 +307,16 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Stream_read(
             Ok(result) => {
                 let result: &[u8] = result.as_ref();
                 JENV.with(|cell| {
-                    let env_ptr = cell.borrow().unwrap();
-                    let mut env = JNIEnv::from_raw(env_ptr).unwrap();
+                    let env = get_thread_local_jenv(cell);
                     let output = env.byte_array_from_slice(&result).unwrap();
-                    let s = JValueGen::from(JObject::from(output));
-                    let _ = env
-                        .call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()])
-                        .unwrap();
+                    call_future_complete_method(env, future, JObject::from(output));
                 });
             }
-            Err(_) => {
-                todo!();
+            Err(err) => {
+                JENV.with(|cell| {
+                    let mut env = get_thread_local_jenv(cell);
+                    call_future_complete_exceptionally_method(&mut env, future, err.to_string());
+                });
             }
         };
     });

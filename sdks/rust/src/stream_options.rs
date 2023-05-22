@@ -7,7 +7,7 @@ pub struct StreamOptions {
     pub retention: Duration,
 }
 impl StreamOptions {
-    pub fn new(replica: u8) -> Self {
+    pub fn new(replica: u8, ack: u8, retention: Duration) -> Self {
         todo!()
     }
 }

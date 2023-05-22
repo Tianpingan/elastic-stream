@@ -1,7 +1,7 @@
 package sdk.elastic.stream.jni;
-public abstract class ElasticStreamObject implements AutoCloseable{
+public abstract class ElasticStreamObject implements AutoCloseable {
     static {
-        System.loadLibrary("front_end_sdk");
+        System.loadLibrary("frontend_sdk");
     }
-    public long ptr;
+    long ptr;
 }
