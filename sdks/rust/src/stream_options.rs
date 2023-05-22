@@ -6,3 +6,8 @@ pub struct StreamOptions {
     pub ack: u8,
     pub retention: Duration,
 }
+impl StreamOptions {
+    pub fn new(replica: u8) -> Self {
+        todo!()
+    }
+}
