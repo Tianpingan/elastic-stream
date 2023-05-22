@@ -1,5 +1,5 @@
-use jni::objects::{JByteArray, JClass, JObject, JString, JValue, JValueGen};
-use jni::sys::{jint, jlong, jstring, JNI_VERSION_1_8};
+use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JValue, JValueGen};
+use jni::sys::{jint, jlong, JNINativeInterface_, JNI_VERSION_1_8};
 use jni::{JNIEnv, JavaVM};
 use std::cell::{OnceCell, RefCell};
 use std::ffi::c_void;
@@ -17,7 +17,9 @@ thread_local! {
     static JAVA_VM: RefCell<Option<Arc<JavaVM>>> = RefCell::new(None);
     static JENV: RefCell<Option<*mut jni::sys::JNIEnv>> = RefCell::new(None);
 }
-
+/// # Safety
+///
+/// This function could be only called by java vm when onload this lib.
 #[no_mangle]
 pub unsafe extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
     // TODO: make this configurable in the future
@@ -61,13 +63,14 @@ pub unsafe extern "system" fn JNI_OnUnload(_: JavaVM, _: *mut c_void) {
     }
 }
 
-/// StreamManager
+// StreamManager
+
 #[no_mangle]
 pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_StreamManager_getStreamManager(
     _env: JNIEnv,
     _class: JClass,
 ) -> jlong {
-    let stream_manager = StreamManager::new();
+    let stream_manager = StreamManager::new("test");
     Box::into_raw(Box::new(stream_manager)) as jlong
 }
 
@@ -96,44 +99,24 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_StreamManager_create(
         let result = stream_manager.create(options).await;
         match result {
             Ok(stream) => {
+                let ptr = Box::into_raw(Box::new(stream)) as jlong;
                 JENV.with(|cell| {
-                    let ptr = Box::into_raw(Box::new(stream)) as jlong;
-                    let env_ptr = cell.borrow().unwrap();
-                    let mut env = JNIEnv::from_raw(env_ptr).unwrap();
+                    let mut env = get_thread_local_jenv(cell);
                     let stream_class = env.find_class("sdk/elastic/stream/jni/Stream").unwrap();
                     let obj = env
                         .new_object(stream_class, "(J)V", &[jni::objects::JValueGen::Long(ptr)])
                         .unwrap();
-                    let s = JValueGen::from(obj);
-                    let _ = env
-                        .call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()])
-                        .unwrap();
+                    call_future_complete_method(env, future, obj);
                 });
             }
             Err(err) => {
-                // TODO
                 JENV.with(|cell| {
-                    let env_ptr = cell.borrow().unwrap();
-                    let mut env = JNIEnv::from_raw(env_ptr).unwrap();
-
-                    let exception_class = env.find_class("java/lang/Exception").unwrap();
-                    let message = env.new_string("a demo exception for test").unwrap();
-                    let obj = env
-                        .new_object(
-                            exception_class,
-                            "(Ljava/lang/String;)V",
-                            &[JValue::Object(message.as_ref())],
-                        )
-                        .unwrap();
-                    let s = JValueGen::from(obj);
-                    let _ = env
-                        .call_method(
-                            future,
-                            "completeExceptionally",
-                            "(Ljava/lang/Throwable;)Z",
-                            &[s.borrow()],
-                        )
-                        .unwrap();
+                    let mut env = get_thread_local_jenv(cell);
+                    call_future_complete_exceptionally_method(
+                        &mut env,
+                        future,
+                        "a demo exception for test".to_string(),
+                    );
                 });
             }
         };
@@ -328,4 +311,41 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Stream_read(
             }
         };
     });
+}
+
+unsafe fn call_future_complete_method(mut env: JNIEnv, future: GlobalRef, obj: JObject) {
+    let s = JValueGen::from(obj);
+    let _ = env
+        .call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()])
+        .unwrap();
+}
+
+unsafe fn call_future_complete_exceptionally_method(
+    env: &mut JNIEnv,
+    future: GlobalRef,
+    err_msg: String,
+) {
+    let exception_class = env.find_class("java/lang/Exception").unwrap();
+    let message = env.new_string(err_msg).unwrap();
+    let obj = env
+        .new_object(
+            exception_class,
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(message.as_ref())],
+        )
+        .unwrap();
+    let s = JValueGen::from(obj);
+    let _ = env
+        .call_method(
+            future,
+            "completeExceptionally",
+            "(Ljava/lang/Throwable;)Z",
+            &[s.borrow()],
+        )
+        .unwrap();
+}
+
+unsafe fn get_thread_local_jenv(cell: &RefCell<Option<*mut *const JNINativeInterface_>>) -> JNIEnv {
+    let env_ptr = cell.borrow().unwrap();
+    JNIEnv::from_raw(env_ptr).unwrap()
 }
