@@ -1,4 +1,4 @@
-use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue, JValueGen};
+use jni::objects::{GlobalRef, JClass, JObject, JString, JValue, JValueGen};
 use jni::sys::{jint, jlong, JNINativeInterface_, JNI_VERSION_1_8};
 use jni::{JNIEnv, JavaVM};
 use log::{error, info};
@@ -366,6 +366,7 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Frontend_open(
     _class: JClass,
     ptr: *mut Frontend,
     id: jlong,
+    epoch: jlong,
     future: JObject,
 ) {
     let front_end = &mut *ptr;
@@ -447,17 +448,15 @@ pub unsafe extern "system" fn Java_sdk_elastic_stream_jni_Stream_append(
     mut env: JNIEnv,
     _class: JClass,
     ptr: *mut Stream,
-    data: JByteArray,
+    data: JObject,
     count: jint,
     future: JObject,
 ) {
     let stream = &mut *ptr;
     let future = env.new_global_ref(future).unwrap();
-    let array = env
-        .get_array_elements(&data, jni::objects::ReleaseMode::CopyBack)
-        .unwrap();
-    let len = env.get_array_length(&data).unwrap();
-    let slice = from_raw_parts(array.as_ptr() as *mut u8, len.try_into().unwrap());
+    let buf = env.get_direct_buffer_address((&data).into()).unwrap();
+    let len = env.get_direct_buffer_capacity((&data).into()).unwrap();
+    let slice = from_raw_parts(buf, len);
 
     let command = Command::Append {
         stream: stream,
