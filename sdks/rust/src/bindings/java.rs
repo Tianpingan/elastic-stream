@@ -108,11 +108,14 @@ async fn process_read_command(
     let result = stream.read(start_offset, end_offset, batch_max_bytes).await;
     match result {
         Ok(result) => {
-            let result: &[u8] = result.as_ref();
+            let len = result.len();
+            let buf = result.as_ptr() as *mut u8;
+            // TODO: It should just forget the memory pointed by buf, not the all result
+            std::mem::forget(result);
             JENV.with(|cell| {
-                let env = unsafe { get_thread_local_jenv(cell) };
-                let output = env.byte_array_from_slice(&result).unwrap();
-                unsafe { call_future_complete_method(env, future, JObject::from(output)) };
+                let mut env = unsafe { get_thread_local_jenv(cell) };
+                let obj = unsafe { env.new_direct_byte_buffer(buf, len).unwrap() };
+                unsafe { call_future_complete_method(env, future, JObject::from(obj)) };
             });
         }
         Err(err) => {
