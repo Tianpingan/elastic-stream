@@ -156,16 +156,7 @@ async fn process_open_stream_command(
     match result {
         Ok(stream) => {
             let ptr = Box::into_raw(Box::new(stream)) as jlong;
-            JENV.with(|cell| {
-                let mut env = get_thread_local_jenv(cell);
-                let stream_class = env
-                    .find_class("com/automq/elasticstream/client/jni/Stream")
-                    .expect("Couldn't find com/automq/elasticstream/client/jni/Stream class");
-                let obj = env
-                    .new_object(stream_class, "(J)V", &[jni::objects::JValueGen::Long(ptr)])
-                    .unwrap();
-                call_future_complete_method(env, future, obj);
-            });
+            complete_future_with_stream(future, ptr);
         }
         Err(err) => {
             complete_future_with_error(future, err.to_string());
@@ -537,6 +528,20 @@ fn throw_exception(env: &mut JNIEnv, msg: &str) {
     let _ = env.exception_clear();
     env.throw_new("java/lang/Exception", msg)
         .expect("Couldn't throw exception");
+}
+
+fn complete_future_with_stream(future: GlobalRef, ptr: i64) {
+    JENV.with(|cell| {
+        let mut env = get_thread_local_jenv(cell);
+        let class_name = "com/automq/elasticstream/client/jni/Stream";
+        let stream_class = env
+            .find_class(class_name)
+            .expect(&format!("Couldn't find {} class", class_name));
+        let obj = env
+            .new_object(stream_class, "(J)V", &[jni::objects::JValueGen::Long(ptr)])
+            .expect(&format!("Couldn't create {} object", class_name));
+        call_future_complete_method(env, future, obj);
+    });
 }
 
 fn complete_future_with_jlong(future: GlobalRef, value: i64) {
