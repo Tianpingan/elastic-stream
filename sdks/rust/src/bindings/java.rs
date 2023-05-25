@@ -487,34 +487,36 @@ pub extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_read(
 
 fn call_future_complete_method(mut env: JNIEnv, future: GlobalRef, obj: JObject) {
     let s = JValueGen::from(obj);
-    let _ = env
-        .call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()])
-        .expect("Couldn't call future complete method");
+    if let Err(_) = env.call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()]) {
+        error!("Failed to call future complete method");
+    }
 }
 
 fn call_future_complete_exceptionally_method(env: &mut JNIEnv, future: GlobalRef, err_msg: String) {
-    let exception_class = env
-        .find_class("java/lang/Exception")
-        .expect("Couldn't find java/lang/Exception class");
-    let message = env
-        .new_string(err_msg)
-        .expect("Couldn't create an exception error message");
-    let obj = env
-        .new_object(
+    let exception_class = env.find_class("java/lang/Exception");
+    let message = env.new_string(err_msg);
+    if let (Ok(exception_class), Ok(message)) = (exception_class, message) {
+        let obj = env.new_object(
             exception_class,
             "(Ljava/lang/String;)V",
             &[JValue::Object(message.as_ref())],
-        )
-        .expect("Couldn't create java/lang/Exception object");
-    let s = JValueGen::from(obj);
-    let _ = env
-        .call_method(
-            future,
-            "completeExceptionally",
-            "(Ljava/lang/Throwable;)Z",
-            &[s.borrow()],
-        )
-        .expect("Couldn't call future completeExceptionally method");
+        );
+        if let Ok(obj) = obj {
+            let s = JValueGen::from(obj);
+            if let Err(_) = env.call_method(
+                future,
+                "completeExceptionally",
+                "(Ljava/lang/Throwable;)Z",
+                &[s.borrow()],
+            ) {
+                error!("Failed to call future completeExceptionally method");
+            }
+        } else {
+            error!("Failed to create exception object");
+        }
+    } else {
+        error!("Failed to get exception_class or error_message");
+    }
 }
 
 fn get_thread_local_jenv(cell: &RefCell<Option<*mut *const JNINativeInterface_>>) -> JNIEnv {
@@ -526,21 +528,26 @@ fn get_thread_local_jenv(cell: &RefCell<Option<*mut *const JNINativeInterface_>>
 
 fn throw_exception(env: &mut JNIEnv, msg: &str) {
     let _ = env.exception_clear();
-    env.throw_new("java/lang/Exception", msg)
-        .expect("Couldn't throw exception");
+    if let Err(_) = env.throw_new("java/lang/Exception", msg) {
+        error!("Failed to throw new exception");
+    }
 }
 
 fn complete_future_with_stream(future: GlobalRef, ptr: i64) {
     JENV.with(|cell| {
         let mut env = get_thread_local_jenv(cell);
         let class_name = "com/automq/elasticstream/client/jni/Stream";
-        let stream_class = env
-            .find_class(class_name)
-            .expect(&format!("Couldn't find {} class", class_name));
-        let obj = env
-            .new_object(stream_class, "(J)V", &[jni::objects::JValueGen::Long(ptr)])
-            .expect(&format!("Couldn't create {} object", class_name));
-        call_future_complete_method(env, future, obj);
+        if let Ok(stream_class) = env.find_class(class_name) {
+            if let Ok(obj) =
+                env.new_object(stream_class, "(J)V", &[jni::objects::JValueGen::Long(ptr)])
+            {
+                call_future_complete_method(env, future, obj);
+            } else {
+                error!("Couldn't create {} object", class_name);
+            }
+        } else {
+            error!("Couldn't find {} class", class_name);
+        }
     });
 }
 
@@ -548,13 +555,17 @@ fn complete_future_with_jlong(future: GlobalRef, value: i64) {
     JENV.with(|cell| {
         let mut env = get_thread_local_jenv(cell);
         let class_name = "java/lang/Long";
-        let long_class = env
-            .find_class(class_name)
-            .expect(&format!("Couldn't find {} class", class_name));
-        let obj = env
-            .new_object(long_class, "(J)V", &[jni::objects::JValueGen::Long(value)])
-            .expect(&format!("Couldn't create {} object", class_name));
-        call_future_complete_method(env, future, obj);
+        if let Ok(long_class) = env.find_class(class_name) {
+            if let Ok(obj) =
+                env.new_object(long_class, "(J)V", &[jni::objects::JValueGen::Long(value)])
+            {
+                call_future_complete_method(env, future, obj);
+            } else {
+                error!("Failed to create {} object", class_name);
+            }
+        } else {
+            error!("Failed to find {} class", class_name);
+        }
     });
 }
 
