@@ -240,8 +240,7 @@ pub extern "system" fn JNI_OnUnload(_: JavaVM, _: *mut c_void) {
     unsafe { TX.take() };
 }
 
-// Frontend
-
+/// Bind to Frontend.getFrontend()
 #[no_mangle]
 pub extern "system" fn Java_com_automq_elasticstream_client_jni_Frontend_getFrontend(
     mut env: JNIEnv,
@@ -287,6 +286,7 @@ pub extern "system" fn Java_com_automq_elasticstream_client_jni_Frontend_getFron
     }
 }
 
+/// Bind to Frontend.freeFrontend()
 #[no_mangle]
 pub extern "system" fn Java_com_automq_elasticstream_client_jni_Frontend_freeFrontend(
     mut _env: JNIEnv,
@@ -296,7 +296,7 @@ pub extern "system" fn Java_com_automq_elasticstream_client_jni_Frontend_freeFro
     // Take ownership of the pointer by wrapping it with a Box
     let _ = unsafe { Box::from_raw(ptr) };
 }
-
+/// Bind to Frontend.create(replica, ack, retention_millis)
 #[no_mangle]
 pub extern "system" fn Java_com_automq_elasticstream_client_jni_Frontend_create(
     mut env: JNIEnv,
@@ -329,6 +329,7 @@ pub extern "system" fn Java_com_automq_elasticstream_client_jni_Frontend_create(
         info!("Failed to construct CreateStream command");
     };
 }
+/// Bind to Frontend.open(id, epoch)
 #[no_mangle]
 pub extern "system" fn Java_com_automq_elasticstream_client_jni_Frontend_open(
     mut env: JNIEnv,
@@ -360,19 +361,17 @@ pub extern "system" fn Java_com_automq_elasticstream_client_jni_Frontend_open(
         info!("Failed to construct OpenStream command");
     }
 }
-
-// Stream
-
+/// Bind to Stream.freeStream()
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_freeStream(
+pub extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_freeStream(
     env: JNIEnv,
     _class: JClass,
     ptr: *mut Stream,
 ) {
     // Take ownership of the pointer by wrapping it with a Box
-    let _ = Box::from_raw(ptr);
+    let _ = unsafe { Box::from_raw(ptr) };
 }
-
+/// Bind to Stream.startOffset()
 #[no_mangle]
 pub extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_startOffset(
     mut env: JNIEnv,
@@ -399,7 +398,7 @@ pub extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_startOffs
         info!("Failed to construct StartOffset command.");
     }
 }
-
+/// Bind to Stream.nextOffset()
 #[no_mangle]
 pub extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_nextOffset(
     mut env: JNIEnv,
@@ -426,9 +425,9 @@ pub extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_nextOffse
         info!("Failed to construct NextOffset command");
     }
 }
-
+/// Bind to Stream.append(data)
 #[no_mangle]
-pub unsafe extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_append(
+pub extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_append(
     mut env: JNIEnv,
     _class: JClass,
     ptr: *mut Stream,
@@ -440,8 +439,8 @@ pub unsafe extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_ap
     let future = env.new_global_ref(future);
     let command: Result<Command, ()> = match (buf, len, future) {
         (Ok(buf), Ok(len), Ok(future)) => {
-            let stream = &mut *ptr;
-            let buf = Bytes::copy_from_slice(slice::from_raw_parts(buf, len));
+            let stream = unsafe { &mut *ptr };
+            let buf = Bytes::copy_from_slice(unsafe { slice::from_raw_parts(buf, len) });
             Ok(Command::Append {
                 stream,
                 buf,
@@ -451,7 +450,7 @@ pub unsafe extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_ap
         _ => Err(()),
     };
     if let Ok(command) = command {
-        if let Some(tx) = TX.get() {
+        if let Some(tx) = unsafe { TX.get() } {
             if let Err(_e) = tx.send(command) {
                 error!("Failed to dispatch Append command to tokio-uring runtime");
             }
@@ -463,6 +462,7 @@ pub unsafe extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_ap
     }
 }
 
+/// Bind to Stream.read(start_offset, end_offset, batch_max_bytes)
 #[no_mangle]
 pub extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_read(
     env: JNIEnv,
@@ -495,14 +495,28 @@ pub extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_read(
         info!("Failed to construct Read command");
     }
 }
-
+/// Call Java future complete() method and put an object as argument
+///
+/// # Arguments
+/// `env` - JNIEnv struct
+/// `future` - Java future
+/// `obj` - Java Object
+/// # Returns
+///
 fn call_future_complete_method(mut env: JNIEnv, future: GlobalRef, obj: JObject) {
     let s = JValueGen::from(obj);
     if let Err(_) = env.call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()]) {
         error!("Failed to call future complete method");
     }
 }
-
+/// Call Java future completeExceptionally() method
+///
+/// # Arguments
+/// `env` - JNIEnv struct
+/// `future` - Java future
+/// `err_msg` - Error message that used to create exception object
+/// # Returns
+///
 fn call_future_complete_exceptionally_method(env: &mut JNIEnv, future: GlobalRef, err_msg: String) {
     let exception_class = env.find_class("java/lang/Exception");
     let message = env.new_string(err_msg);
@@ -530,6 +544,12 @@ fn call_future_complete_exceptionally_method(env: &mut JNIEnv, future: GlobalRef
     }
 }
 
+/// Get thread local JNIEnv that used to call future method
+///
+/// # Arguments
+/// `cell` -
+/// # Returns
+/// thread local JNIEnv
 fn get_thread_local_jenv(cell: &RefCell<Option<*mut *const JNINativeInterface_>>) -> JNIEnv {
     let env_ptr = cell
         .borrow()
@@ -537,6 +557,13 @@ fn get_thread_local_jenv(cell: &RefCell<Option<*mut *const JNINativeInterface_>>
     unsafe { JNIEnv::from_raw(env_ptr).expect("Couldn't create a JNIEnv from raw pointer") }
 }
 
+/// Throw an java exception
+///
+/// # Arguments
+/// `env` - Current JNIEnv struct
+/// `msg` - Error message
+/// # Returns
+///
 fn throw_exception(env: &mut JNIEnv, msg: &str) {
     let _ = env.exception_clear();
     if let Err(_) = env.throw_new("java/lang/Exception", msg) {
@@ -544,6 +571,13 @@ fn throw_exception(env: &mut JNIEnv, msg: &str) {
     }
 }
 
+/// Call Java future complete() method and put a "com/automq/elasticstream/client/jni/Stream" object as argument
+///
+/// # Arguments
+/// `future` - Java future
+/// `ptr` - The memory address of the stream
+/// # Returns
+///
 fn complete_future_with_stream(future: GlobalRef, ptr: i64) {
     JENV.with(|cell| {
         let mut env = get_thread_local_jenv(cell);
@@ -562,6 +596,13 @@ fn complete_future_with_stream(future: GlobalRef, ptr: i64) {
     });
 }
 
+/// Call Java future complete() method and put a "java/lang/Long" object as argument
+///
+/// # Arguments
+/// `future` - Java future
+/// `value` - The value of argument
+/// # Returns
+///
 fn complete_future_with_jlong(future: GlobalRef, value: i64) {
     JENV.with(|cell| {
         let mut env = get_thread_local_jenv(cell);
@@ -579,7 +620,13 @@ fn complete_future_with_jlong(future: GlobalRef, value: i64) {
         }
     });
 }
-
+/// Call Java future completeExceptionally() method
+///
+/// # Arguments
+/// `future` - Java future
+/// `err_msg` - Error message that used to create exception object
+/// # Returns
+///
 fn complete_future_with_error(future: GlobalRef, err_msg: String) {
     JENV.with(|cell| {
         let mut env = get_thread_local_jenv(cell);
