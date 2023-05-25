@@ -92,19 +92,25 @@ async fn process_read_command(
         Ok(buffers) => {
             // Copy buffers to `DirectByteBuffer`
             let total = buffers.iter().map(|buf| buf.len()).sum();
-            let layout = Layout::from_size_align(total, 1).expect("Bad alignment");
-            let ptr = unsafe { std::alloc::alloc(layout) };
-            let mut p = 0;
-            buffers.iter().for_each(|buf| {
-                unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr.add(p), buf.len()) };
-                p += buf.len();
-            });
+            if let Ok(layout) = Layout::from_size_align(total, 1) {
+                let ptr = unsafe { std::alloc::alloc(layout) };
+                let mut p = 0;
+                buffers.iter().for_each(|buf| {
+                    unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr.add(p), buf.len()) };
+                    p += buf.len();
+                });
 
-            JENV.with(|cell| {
-                let mut env = get_thread_local_jenv(cell);
-                let obj = unsafe { env.new_direct_byte_buffer(ptr, total).unwrap() };
-                call_future_complete_method(env, future, JObject::from(obj));
-            });
+                JENV.with(|cell| {
+                    let mut env = get_thread_local_jenv(cell);
+                    if let Ok(obj) = unsafe { env.new_direct_byte_buffer(ptr, total) } {
+                        call_future_complete_method(env, future, JObject::from(obj));
+                    } else {
+                        error!("Failed to create a new direct_byte_buffer");
+                    }
+                });
+            } else {
+                error!("Bad alignment");
+            }
         }
         Err(err) => {
             complete_future_with_error(future, err.to_string());
@@ -193,13 +199,18 @@ async fn process_create_stream_command(
 pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
     let java_vm = Arc::new(vm);
     let (tx, mut rx) = mpsc::unbounded_channel();
-    unsafe { TX.set(tx).expect("Failed to set command channel sender") };
+    if let Err(_) = unsafe { TX.set(tx) } {
+        error!("Failed to set command channel sender");
+    }
     let _ = std::thread::Builder::new()
         .name("Runtime".to_string())
         .spawn(move || {
             JENV.with(|cell| {
-                let env = java_vm.attach_current_thread_as_daemon().unwrap();
-                *cell.borrow_mut() = Some(env.get_raw());
+                if let Ok(env) = java_vm.attach_current_thread_as_daemon() {
+                    *cell.borrow_mut() = Some(env.get_raw());
+                } else {
+                    error!("Failed to attach current thread as daemon");
+                }
             });
             JAVA_VM.with(|cell| {
                 *cell.borrow_mut() = Some(java_vm.clone());
