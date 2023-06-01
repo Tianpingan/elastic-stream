@@ -25,33 +25,33 @@ public class ElasticStreamClientException extends ExecutionException {
         }
     }
     public static class StreamNotFound extends ElasticStreamClientException {
-        private long stream_id;
-        StreamNotFound(long stream_id) {
-            super("Stream[id={" + stream_id + "}] is not found");
-            this.stream_id = stream_id;
+        private long streamId;
+        StreamNotFound(long streamId) {
+            super("Stream[id={" + streamId + "}] is not found");
+            this.streamId = streamId;
         }
         public long getStreamId() {
-            return this.stream_id;
+            return this.streamId;
         }
     }
     public static class BrokenChannel extends ElasticStreamClientException {
-        private String err_msg;
-        BrokenChannel(String err_msg) {
-            super("MPSC to submit command is broken: " + err_msg);
-            this.err_msg = err_msg;
+        private String errMsg;
+        BrokenChannel(String errMsg) {
+            super("MPSC to submit command is broken: " + errMsg);
+            this.errMsg = errMsg;
         }
         public String getErrMsg() {
-            return this.err_msg;
+            return this.errMsg;
         }
     }
     public static class Internal extends ElasticStreamClientException {
-        private String err_msg;
+        private String errMsg;
         Internal(String str) {
             super("Unexpected internal client error");
-            this.err_msg = str;
+            this.errMsg = str;
         }
         public String getErrMsg() {
-            return this.err_msg;
+            return this.errMsg;
         }
     } 
 
@@ -129,13 +129,13 @@ public class ElasticStreamClientException extends ExecutionException {
         }
     }
     public static class RpcClientErrorConnectFailure extends ElasticStreamClientException {
-        private String err_msg;
-        RpcClientErrorConnectFailure(String err_msg) {
-            super("Failed to establish TCP connection. Cause: " + err_msg);
-            this.err_msg = err_msg;
+        private String errMsg;
+        RpcClientErrorConnectFailure(String errMsg) {
+            super("Failed to establish TCP connection. Cause: " + errMsg);
+            this.errMsg = errMsg;
         }
         public String getErrMsg() {
-            return this.err_msg;
+            return this.errMsg;
         }
     }
     public static class RpcClientErrorDisableNagleAlgorithm extends ElasticStreamClientException {
@@ -154,23 +154,23 @@ public class ElasticStreamClientException extends ExecutionException {
         }
     }
     public static class RpcClientErrorAppend extends ElasticStreamClientException {
-        private int error_code;
-        RpcClientErrorAppend(int error_code) {
-            super("Append records failed with error code: " + error_code);
-            this.error_code = error_code;
+        private int errorCode;
+        RpcClientErrorAppend(int errorCode) {
+            super("Append records failed with error code: " + errorCode);
+            this.errorCode = errorCode;
         }
         public int getErrorCode() {
-            return this.error_code;
+            return this.errorCode;
         }
     }
     public static class RpcClientErrorCreateRange extends ElasticStreamClientException {
-        private int error_code;
-        RpcClientErrorCreateRange(int error_code) {
-            super("Create topic failed with error code: " + error_code);
-            this.error_code = error_code;
+        private int errorCode;
+        RpcClientErrorCreateRange(int errorCode) {
+            super("Create topic failed with error code: " + errorCode);
+            this.errorCode = errorCode;
         }
         public int getErrorCode() {
-            return this.error_code;
+            return this.errorCode;
         }
     }
     public static class RpcClientErrorServerInternal extends ElasticStreamClientException {
@@ -184,13 +184,13 @@ public class ElasticStreamClientException extends ExecutionException {
         }
     }
     public static class RpcClientErrorRpcTimeout extends ElasticStreamClientException {
-        private long timeout_millis;
-        RpcClientErrorRpcTimeout(long timeout_millis) {
-            super("Client fails to receive response from server within " + timeout_millis + " ms");
-            this.timeout_millis = timeout_millis;
+        private long timeoutMillis;
+        RpcClientErrorRpcTimeout(long timeoutMillis) {
+            super("Client fails to receive response from server within " + timeoutMillis + " ms");
+            this.timeoutMillis = timeoutMillis;
         }
         public long getTimeoutMillis() {
-            return this.timeout_millis;
+            return this.timeoutMillis;
         }
     }
 }
