@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use jni::objects::{GlobalRef, JClass, JObject, JString, JValue, JValueGen};
+use jni::objects::{GlobalRef, JClass, JObject, JString, JValue, JValueGen, JMethodID};
 use jni::sys::{jint, jlong, JNINativeInterface_, JNI_VERSION_1_8};
 use jni::{JNIEnv, JavaVM};
 use log::{error, info, trace};
@@ -19,8 +19,11 @@ use super::cmd::Command;
 static mut TX: OnceCell<mpsc::UnboundedSender<Command>> = OnceCell::new();
 // TODO: Add exception class cache
 static mut STREAM_CLASS_CACHE: OnceCell<GlobalRef> = OnceCell::new();
+static mut STREAM_CTOR_CACHE: OnceCell<JMethodID> = OnceCell::new();
 static mut JLONG_CLASS_CACHE: OnceCell<GlobalRef> = OnceCell::new();
+static mut JLONG_CTOR_CACHE: OnceCell<JMethodID> = OnceCell::new();
 static mut VOID_CLASS_CACHE: OnceCell<GlobalRef> = OnceCell::new();
+static mut VOID_CTOR_CACHE: OnceCell<JMethodID> = OnceCell::new();
 thread_local! {
     static JAVA_VM: RefCell<Option<Arc<JavaVM>>> = RefCell::new(None);
     static JENV: RefCell<Option<*mut jni::sys::JNIEnv>> = RefCell::new(None);
@@ -280,18 +283,25 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
             JENV.with(|cell| {
                 if let Ok(mut env) = java_vm.attach_current_thread_as_daemon() {
                     *cell.borrow_mut() = Some(env.get_raw());
-                    let string_path = "com/automq/elasticstream/client/jni/Stream";
+                    let stream_path = "com/automq/elasticstream/client/jni/Stream";
                     let void_path = "java/lang/Void";
                     let jlong_path = "java/lang/Long";
-                    let stream_class = env.find_class(string_path).unwrap();
+                    let stream_class = env.find_class(stream_path).unwrap();
                     let stream_class: GlobalRef = env.new_global_ref(stream_class).unwrap();
+                    let stream_ctor = env.get_method_id(stream_path, "<init>", "(J)V").unwrap();
+
                     let void_class = env.find_class(void_path).unwrap();
                     let void_class: GlobalRef = env.new_global_ref(void_class).unwrap();
+                    let void_ctor = env.get_method_id(void_path, "<init>", "()V").unwrap();
                     let jlong_class = env.find_class(jlong_path).unwrap();
                     let jlong_class: GlobalRef = env.new_global_ref(jlong_class).unwrap();
+                    let jlong_ctor = env.get_method_id(jlong_path, "<init>", "(J)V").unwrap();
                     unsafe { STREAM_CLASS_CACHE.set(stream_class).unwrap() };
+                    unsafe { STREAM_CTOR_CACHE.set(stream_ctor).unwrap() };
                     unsafe { VOID_CLASS_CACHE.set(void_class).unwrap() };
+                    unsafe { VOID_CTOR_CACHE.set(void_ctor).unwrap() };
                     unsafe { JLONG_CLASS_CACHE.set(jlong_class).unwrap() };
+                    unsafe { JLONG_CTOR_CACHE.set(jlong_ctor).unwrap() };
                 } else {
                     error!("Failed to attach current thread as daemon");
                 }
@@ -1021,10 +1031,11 @@ fn throw_exception(env: &mut JNIEnv, msg: &str) {
 fn complete_future_with_stream(future: GlobalRef, ptr: i64) {
     JENV.with(|cell| {
         let mut env = get_thread_local_jenv(cell); 
-        let stream_class = unsafe { STREAM_CLASS_CACHE.get() };
-        if let Some(stream_class) = stream_class {
+        let stream_class = unsafe { STREAM_CLASS_CACHE.get() }; 
+        let stream_ctor = unsafe {STREAM_CTOR_CACHE.get()};
+        if let (Some(stream_class), Some(stream_ctor)) = (stream_class, stream_ctor) {
             if let Ok(obj) =
-                env.new_object(stream_class, "(J)V", &[jni::objects::JValueGen::Long(ptr)])
+            unsafe { env.new_object_unchecked(stream_class, *stream_ctor, &[jni::objects::JValue::Long(ptr).as_jni()]) }
             {
                 call_future_complete_method(env, future, obj);
             } else {
@@ -1040,9 +1051,10 @@ fn complete_future_with_jlong(future: GlobalRef, value: i64) {
     JENV.with(|cell| {
         let mut env = get_thread_local_jenv(cell);
         let long_class = unsafe { JLONG_CLASS_CACHE.get() };
-        if let Some(long_class) = long_class {
+        let long_ctor = unsafe { JLONG_CTOR_CACHE.get() };
+        if let (Some(long_class), Some(long_ctor)) = (long_class, long_ctor) {
             if let Ok(obj) =
-                env.new_object(long_class, "(J)V", &[jni::objects::JValueGen::Long(value)])
+                unsafe { env.new_object_unchecked(long_class, *long_ctor, &[jni::objects::JValue::Long(value).as_jni()]) }
             {
                 call_future_complete_method(env, future, obj);
             } else {
@@ -1058,8 +1070,9 @@ fn complete_future_with_void(future: GlobalRef) {
     JENV.with(|cell| {
         let mut env = get_thread_local_jenv(cell);
         let void_class = unsafe { VOID_CLASS_CACHE.get() };
-        if let Some(void_class) = void_class {
-            if let Ok(obj) = env.new_object(void_class, "()V", &[]) {
+        let void_ctor = unsafe {VOID_CTOR_CACHE.get()};
+        if let (Some(void_class), Some(void_ctor)) = (void_class, void_ctor) {
+            if let Ok(obj) = unsafe { env.new_object_unchecked(void_class, *void_ctor, &[]) } {
                 call_future_complete_method(env, future, obj);
             } else {
                 panic!("Failed to create Void object");
