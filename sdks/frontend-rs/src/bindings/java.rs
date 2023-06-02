@@ -17,7 +17,10 @@ use crate::{ClientError, Frontend, Stopwatch, Stream, StreamOptions};
 use super::cmd::Command;
 
 static mut TX: OnceCell<mpsc::UnboundedSender<Command>> = OnceCell::new();
-
+// TODO: Add exception class cache
+static mut STREAM_CLASS_CACHE: OnceCell<GlobalRef> = OnceCell::new();
+static mut JLONG_CLASS_CACHE: OnceCell<GlobalRef> = OnceCell::new();
+static mut VOID_CLASS_CACHE: OnceCell<GlobalRef> = OnceCell::new();
 thread_local! {
     static JAVA_VM: RefCell<Option<Arc<JavaVM>>> = RefCell::new(None);
     static JENV: RefCell<Option<*mut jni::sys::JNIEnv>> = RefCell::new(None);
@@ -275,8 +278,20 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
         .spawn(move || {
             trace!("JNI Runtime thread started");
             JENV.with(|cell| {
-                if let Ok(env) = java_vm.attach_current_thread_as_daemon() {
+                if let Ok(mut env) = java_vm.attach_current_thread_as_daemon() {
                     *cell.borrow_mut() = Some(env.get_raw());
+                    let string_path = "com/automq/elasticstream/client/jni/Stream";
+                    let void_path = "java/lang/Void";
+                    let jlong_path = "java/lang/Long";
+                    let stream_class = env.find_class(string_path).unwrap();
+                    let stream_class: GlobalRef = env.new_global_ref(stream_class).unwrap();
+                    let void_class = env.find_class(void_path).unwrap();
+                    let void_class: GlobalRef = env.new_global_ref(void_class).unwrap();
+                    let jlong_class = env.find_class(jlong_path).unwrap();
+                    let jlong_class: GlobalRef = env.new_global_ref(jlong_class).unwrap();
+                    unsafe { STREAM_CLASS_CACHE.set(stream_class).unwrap() };
+                    unsafe { VOID_CLASS_CACHE.set(void_class).unwrap() };
+                    unsafe { JLONG_CLASS_CACHE.set(jlong_class).unwrap() };
                 } else {
                     error!("Failed to attach current thread as daemon");
                 }
@@ -1005,18 +1020,18 @@ fn throw_exception(env: &mut JNIEnv, msg: &str) {
 
 fn complete_future_with_stream(future: GlobalRef, ptr: i64) {
     JENV.with(|cell| {
-        let mut env = get_thread_local_jenv(cell);
-        let class_name = "com/automq/elasticstream/client/jni/Stream";
-        if let Ok(stream_class) = env.find_class(class_name) {
+        let mut env = get_thread_local_jenv(cell); 
+        let stream_class = unsafe { STREAM_CLASS_CACHE.get() };
+        if let Some(stream_class) = stream_class {
             if let Ok(obj) =
                 env.new_object(stream_class, "(J)V", &[jni::objects::JValueGen::Long(ptr)])
             {
                 call_future_complete_method(env, future, obj);
             } else {
-                panic!("Couldn't create {} object", class_name);
+                panic!("Couldn't create Stream object");
             }
         } else {
-            panic!("Couldn't find {} class", class_name);
+            panic!("Couldn't find Stream class");
         }
     });
 }
@@ -1024,17 +1039,17 @@ fn complete_future_with_stream(future: GlobalRef, ptr: i64) {
 fn complete_future_with_jlong(future: GlobalRef, value: i64) {
     JENV.with(|cell| {
         let mut env = get_thread_local_jenv(cell);
-        let class_name = "java/lang/Long";
-        if let Ok(long_class) = env.find_class(class_name) {
+        let long_class = unsafe { JLONG_CLASS_CACHE.get() };
+        if let Some(long_class) = long_class {
             if let Ok(obj) =
                 env.new_object(long_class, "(J)V", &[jni::objects::JValueGen::Long(value)])
             {
                 call_future_complete_method(env, future, obj);
             } else {
-                panic!("Failed to create {} object", class_name);
+                panic!("Failed to create Long object");
             }
         } else {
-            panic!("Failed to find {} object", class_name);
+            panic!("Failed to find Long object");
         }
     });
 }
@@ -1042,15 +1057,15 @@ fn complete_future_with_jlong(future: GlobalRef, value: i64) {
 fn complete_future_with_void(future: GlobalRef) {
     JENV.with(|cell| {
         let mut env = get_thread_local_jenv(cell);
-        let class_name = "java/lang/Void";
-        if let Ok(void_class) = env.find_class(class_name) {
+        let void_class = unsafe { VOID_CLASS_CACHE.get() };
+        if let Some(void_class) = void_class {
             if let Ok(obj) = env.new_object(void_class, "()V", &[]) {
                 call_future_complete_method(env, future, obj);
             } else {
-                panic!("Failed to create {} object", class_name);
+                panic!("Failed to create Void object");
             }
         } else {
-            panic!("Failed to find {} class", class_name);
+            panic!("Failed to find Void class");
         }
     });
 }
