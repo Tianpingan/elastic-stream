@@ -24,6 +24,7 @@ static mut JLONG_CLASS_CACHE: OnceCell<GlobalRef> = OnceCell::new();
 static mut JLONG_CTOR_CACHE: OnceCell<JMethodID> = OnceCell::new();
 static mut VOID_CLASS_CACHE: OnceCell<GlobalRef> = OnceCell::new();
 static mut VOID_CTOR_CACHE: OnceCell<JMethodID> = OnceCell::new();
+static mut FUTURE_COMPLETE_CACHE: OnceCell<JMethodID> = OnceCell::new();
 thread_local! {
     static JAVA_VM: RefCell<Option<Arc<JavaVM>>> = RefCell::new(None);
     static JENV: RefCell<Option<*mut jni::sys::JNIEnv>> = RefCell::new(None);
@@ -286,6 +287,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
                     let stream_path = "com/automq/elasticstream/client/jni/Stream";
                     let void_path = "java/lang/Void";
                     let jlong_path = "java/lang/Long";
+                    let completable_future_path = "java/util/concurrent/CompletableFuture";
                     let stream_class = env.find_class(stream_path).unwrap();
                     let stream_class: GlobalRef = env.new_global_ref(stream_class).unwrap();
                     let stream_ctor = env.get_method_id(stream_path, "<init>", "(J)V").unwrap();
@@ -296,12 +298,14 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
                     let jlong_class = env.find_class(jlong_path).unwrap();
                     let jlong_class: GlobalRef = env.new_global_ref(jlong_class).unwrap();
                     let jlong_ctor = env.get_method_id(jlong_path, "<init>", "(J)V").unwrap();
+                    let future_complete_method = env.get_method_id(completable_future_path, "complete", "(Ljava/lang/Object;)Z").unwrap();
                     unsafe { STREAM_CLASS_CACHE.set(stream_class).unwrap() };
                     unsafe { STREAM_CTOR_CACHE.set(stream_ctor).unwrap() };
                     unsafe { VOID_CLASS_CACHE.set(void_class).unwrap() };
                     unsafe { VOID_CTOR_CACHE.set(void_ctor).unwrap() };
                     unsafe { JLONG_CLASS_CACHE.set(jlong_class).unwrap() };
                     unsafe { JLONG_CTOR_CACHE.set(jlong_ctor).unwrap() };
+                    unsafe { FUTURE_COMPLETE_CACHE.set(future_complete_method).unwrap() };
                 } else {
                     error!("Failed to attach current thread as daemon");
                 }
@@ -715,10 +719,8 @@ pub unsafe extern "system" fn Java_com_automq_elasticstream_client_jni_Stream_re
 fn call_future_complete_method(mut env: JNIEnv, future: GlobalRef, obj: JObject) {
     let s = JValueGen::from(obj);
     let _stopwatch = Stopwatch::new("Future#complete");
-    if env
-        .call_method(future, "complete", "(Ljava/lang/Object;)Z", &[s.borrow()])
-        .is_err()
-    {
+    let method = unsafe { FUTURE_COMPLETE_CACHE.get() }.unwrap();
+    if unsafe { env.call_method_unchecked(future, method, jni::signature::ReturnType::Primitive(jni::signature::Primitive::Boolean), &[s.as_jni()]) }.is_err() {
         panic!("Failed to call future complete method");
     }
 }
