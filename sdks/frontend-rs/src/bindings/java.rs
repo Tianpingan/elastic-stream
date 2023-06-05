@@ -120,17 +120,35 @@ async fn process_read_command(
             let total: usize = buffers.iter().map(|buf| buf.len()).sum();
             JENV.with(|cell| {
                 let mut env = get_thread_local_jenv(cell);
-                let byte_array = env.new_byte_array(total as i32).unwrap();
-                {
-                    let mut element = unsafe { env.get_array_elements(&byte_array, jni::objects::ReleaseMode::CopyBack) }.unwrap();
-                    let mut p: usize = 0;
-                    let ptr = element.as_mut_ptr() as *mut u8;
-                    buffers.iter().for_each(|buf| {
-                        unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr.add(p), buf.len()) };
-                        p += buf.len();
-                    });
+                let byte_array = env.new_byte_array(total as i32);
+                if let Ok(byte_array) = byte_array {
+                    {
+                        // # Safety
+                        // Standard JNI call.
+                        let element = unsafe { env.get_array_elements(&byte_array, jni::objects::ReleaseMode::CopyBack) };
+                        if let Ok(mut element) = element {
+                            let mut p: usize = 0;
+                            let ptr = element.as_mut_ptr() as *mut u8;
+                            buffers.iter().for_each(|buf| {
+                                // # Safety
+                                // We are copying slices from store to continuous memory for ByteArray. This
+                                // is definitely a non-overlapping copy and thus safe.
+                                unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr.add(p), buf.len()) };
+                                p += buf.len();
+                            });
+                        } else {
+                            error!("Failed to get array elements");
+                        }
+                    }
+                    call_future_complete_method(env, future, JObject::from(byte_array));
+                } else {
+                    complete_future_with_error(
+                        future,
+                        ClientError::Internal("Failed to create byte array".to_string()),
+                    );
+                    error!("Failed to create byte array");
                 }
-                call_future_complete_method(env, future, JObject::from(byte_array));
+                
             });
         }
         Err(err) => {
