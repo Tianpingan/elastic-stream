@@ -126,6 +126,10 @@ async fn process_read_command(
                     {
                         buffers.iter().for_each(|buf| {
                             let slice = buf.as_ref();
+                            /// # Safety
+                            /// 
+                            /// The unsafe part is used to convert the &[u8] type slice to a &[i8] type slice
+                            /// which have the same element size and slice length.
                             let slice: &[i8] = unsafe { 
                                 std::slice::from_raw_parts(slice.as_ptr() as *const i8, slice.len())
                             };
