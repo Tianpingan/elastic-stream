@@ -119,26 +119,19 @@ async fn process_read_command(
         Ok(buffers) => {
             let total: usize = buffers.iter().map(|buf| buf.len()).sum();
             JENV.with(|cell| {
-                let mut env = get_thread_local_jenv(cell);
+                let env = get_thread_local_jenv(cell);
                 let byte_array = env.new_byte_array(total as i32);
+                let mut p: usize = 0;
                 if let Ok(byte_array) = byte_array {
                     {
-                        // # Safety
-                        // Standard JNI call.
-                        let element = unsafe { env.get_array_elements(&byte_array, jni::objects::ReleaseMode::CopyBack) };
-                        if let Ok(mut element) = element {
-                            let mut p: usize = 0;
-                            let ptr = element.as_mut_ptr() as *mut u8;
-                            buffers.iter().for_each(|buf| {
-                                // # Safety
-                                // We are copying slices from store to continuous memory for ByteArray. This
-                                // is definitely a non-overlapping copy and thus safe.
-                                unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr.add(p), buf.len()) };
-                                p += buf.len();
-                            });
-                        } else {
-                            error!("Failed to get array elements");
-                        }
+                        buffers.iter().for_each(|buf| {
+                            let slice = buf.as_ref();
+                            let slice: &[i8] = unsafe { 
+                                std::slice::from_raw_parts(slice.as_ptr() as *const i8, slice.len())
+                            };
+                            let _ = env.set_byte_array_region(&byte_array, p as i32, slice);
+                            p += buf.len();
+                        });
                     }
                     call_future_complete_method(env, future, JObject::from(byte_array));
                 } else {
