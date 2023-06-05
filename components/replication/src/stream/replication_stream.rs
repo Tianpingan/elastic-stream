@@ -14,11 +14,11 @@ use std::cmp::{max, min};
 use std::collections::BTreeMap;
 use std::ops::Bound::Included;
 use std::rc::{Rc, Weak};
+use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
-use std::time::Instant;
 
 pub(crate) struct ReplicationStream {
     log_ident: String,
@@ -318,7 +318,7 @@ impl ReplicationStream {
                     inflight.insert(append_request.base_offset(), Rc::new(append_request));
                 }
                 Some(_) = append_tasks_rx.recv() => {
-                    // usaully send by range ack / delay retry
+                    // usually send by range ack / delay retry
                 }
                 _ = shutdown_signal_rx.recv() => {
                     let inflight_count = inflight.len();
@@ -350,7 +350,7 @@ impl ReplicationStream {
                             Ok(end_offset) => {
                                 info!(target: log_ident, "Seal not writable last range[{range_index}] with end_offset={end_offset}.");
                                 // rewind back next append start offset and try append to new writable range in next round.
-                                next_append_start_offset = last_range.confirm_offset();
+                                next_append_start_offset = end_offset;
                                 if let Err(e) = stream.new_range(range_index + 1, end_offset).await
                                 {
                                     error!(target: log_ident, "Try create a new range fail, retry later, err[{e}]");
