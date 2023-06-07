@@ -1008,6 +1008,7 @@ dependencies = [
  "codec",
  "config",
  "criterion",
+ "crossbeam",
  "flatbuffers",
  "futures",
  "jni",
