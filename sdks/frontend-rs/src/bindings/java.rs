@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{ClientError, Frontend, Stopwatch, Stream, StreamOptions};
-use crossbeam::channel::{Receiver, Sender, unbounded};
+use crossbeam::channel::{Sender, unbounded};
 
 use super::cmd::{Command, CallbackCommand};
 
@@ -233,7 +233,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
         error!("Failed to set callback channel sender");
     }
     let cpu_sum = num_cpus::get();
-    (0..cpu_sum).into_iter().for_each(|i| {
+    (0..cpu_sum).for_each(|i| {
         let java_vm_clone = java_vm.clone();
         let callback_rx_clone = callback_rx.clone();
         let _ = std::thread::Builder::new()
