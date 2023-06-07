@@ -52,3 +52,9 @@ pub enum Command<'a> {
         future: GlobalRef,
     },
 }
+
+
+pub enum CallbackCommand<> {
+    Append { future: GlobalRef, base_offset: i64 },
+    Read { future: GlobalRef, buffers: Vec<Bytes> },
+}

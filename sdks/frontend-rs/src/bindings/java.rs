@@ -11,10 +11,12 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{ClientError, Frontend, Stopwatch, Stream, StreamOptions};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 
-use super::cmd::Command;
+use super::cmd::{Command, CallbackCommand};
 
 static mut TX: OnceCell<mpsc::UnboundedSender<Command>> = OnceCell::new();
+static mut CALLBACK_TX: OnceCell<Sender<CallbackCommand>> = OnceCell::new();
 // TODO: Add exception class cache
 static mut STREAM_CLASS_CACHE: OnceCell<GlobalRef> = OnceCell::new();
 static mut STREAM_CTOR_CACHE: OnceCell<JMethodID> = OnceCell::new();
@@ -97,7 +99,9 @@ async fn process_append_command(stream: &mut Stream, buf: Bytes, future: GlobalR
     match result {
         Ok(result) => {
             let base_offset = result.base_offset;
-            complete_future_with_jlong(future, base_offset);
+            // complete_future_with_jlong(future, base_offset);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::Append { future, base_offset });
         }
         Err(err) => {
             complete_future_with_error(future, err);
@@ -116,31 +120,9 @@ async fn process_read_command(
     let result = stream.read(start_offset, end_offset, batch_max_bytes).await;
     match result {
         Ok(buffers) => {
-            let total: usize = buffers.iter().map(|buf| buf.len()).sum();
-            JENV.with(|cell| {
-                let env = get_thread_local_jenv(cell);
-                let byte_array = env.new_byte_array(total as i32);
-                let mut p: usize = 0;
-                if let Ok(byte_array) = byte_array {
-                    {
-                        buffers.iter().for_each(|buf| {
-                            let slice = buf.as_ref();
-                            let slice: &[i8] = unsafe {
-                                std::slice::from_raw_parts(slice.as_ptr() as *const i8, slice.len())
-                            };
-                            let _ = env.set_byte_array_region(&byte_array, p as i32, slice);
-                            p += buf.len();
-                        });
-                    }
-                    call_future_complete_method(env, future, JObject::from(byte_array));
-                } else {
-                    complete_future_with_error(
-                        future,
-                        ClientError::Internal("Failed to create byte array".to_string()),
-                    );
-                    error!("Failed to create byte array");
-                }
-            });
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::Read { future, buffers});
+            // complete_future_with_byte_array(future, buffers);
         }
         Err(err) => {
             complete_future_with_error(future, err);
@@ -241,11 +223,48 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
     crate::init_log();
     let java_vm = Arc::new(vm);
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let (callback_tx, callback_rx) = unbounded();
     // # Safety
     // Set OnceCell, expected to be safe.
     if unsafe { TX.set(tx) }.is_err() {
         error!("Failed to set command channel sender");
     }
+    if unsafe { CALLBACK_TX.set(callback_tx) }.is_err() {
+        error!("Failed to set callback channel sender");
+    }
+    let cpu_sum = num_cpus::get();
+    (0..cpu_sum).into_iter().for_each(|i| {
+        let java_vm_clone = java_vm.clone();
+        let callback_rx_clone = callback_rx.clone();
+        let _ = std::thread::Builder::new()
+        .name(format!("CallBackThread-{}", i))
+        .spawn(move || {
+            JENV.with(|cell| {
+                if let Ok(mut env) = java_vm_clone.attach_current_thread_as_daemon() {
+                    *cell.borrow_mut() = Some(env.get_raw());
+                }});
+            JAVA_VM.with(|cell| {
+                *cell.borrow_mut() = Some(java_vm_clone.clone());
+            });
+            loop {
+                match callback_rx_clone.recv() {
+                    Ok(command) => {
+                        match command {
+                            CallbackCommand::Append { future, base_offset } => 
+                            complete_future_with_jlong(future, base_offset),
+                            CallbackCommand::Read { future, buffers } => 
+                            complete_future_with_byte_array(future, buffers),
+                        }
+                    },
+                    Err(_) => {
+                        info!("Callback channel is dropped");
+                        break;
+                    },
+                }
+            }
+            });
+        });
+//
     let _ = std::thread::Builder::new()
         .name("Runtime".to_string())
         .spawn(move || {
@@ -1077,6 +1096,34 @@ fn complete_future_with_void(future: GlobalRef) {
             }
         } else {
             panic!("Failed to find Void class");
+        }
+    });
+}
+
+fn complete_future_with_byte_array(future: GlobalRef, buffers: Vec<Bytes>) {
+    let total: usize = buffers.iter().map(|buf| buf.len()).sum();
+    JENV.with(|cell| {
+        let env = get_thread_local_jenv(cell);
+        let byte_array = env.new_byte_array(total as i32);
+        let mut p: usize = 0;
+        if let Ok(byte_array) = byte_array {
+            {
+                buffers.iter().for_each(|buf| {
+                    let slice = buf.as_ref();
+                    let slice: &[i8] = unsafe {
+                        std::slice::from_raw_parts(slice.as_ptr() as *const i8, slice.len())
+                    };
+                    let _ = env.set_byte_array_region(&byte_array, p as i32, slice);
+                    p += buf.len();
+                });
+            }
+            call_future_complete_method(env, future, JObject::from(byte_array));
+        } else {
+            complete_future_with_error(
+                future,
+                ClientError::Internal("Failed to create byte array".to_string()),
+            );
+            error!("Failed to create byte array");
         }
     });
 }
