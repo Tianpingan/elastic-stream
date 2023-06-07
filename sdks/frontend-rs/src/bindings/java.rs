@@ -240,7 +240,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
         .name(format!("CallBackThread-{}", i))
         .spawn(move || {
             JENV.with(|cell| {
-                if let Ok(mut env) = java_vm_clone.attach_current_thread_as_daemon() {
+                if let Ok(env) = java_vm_clone.attach_current_thread_as_daemon() {
                     *cell.borrow_mut() = Some(env.get_raw());
                 }});
             JAVA_VM.with(|cell| {
