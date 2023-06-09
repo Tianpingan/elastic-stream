@@ -84,10 +84,14 @@ async fn process_close_stream_command(stream: &mut Stream, future: GlobalRef) {
     let result = stream.close().await;
     match result {
         Ok(_) => {
-            complete_future_with_void(future);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::CloseStream { future });
+            // complete_future_with_void(future);
         }
         Err(err) => {
-            complete_future_with_error(future, err);
+            // complete_future_with_error(future, err);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::ClientError{ future, err });
         }
     };
     trace!("Close command finished");
@@ -104,7 +108,9 @@ async fn process_append_command(stream: &mut Stream, buf: Bytes, future: GlobalR
             let _ = tx.send(CallbackCommand::Append { future, base_offset });
         }
         Err(err) => {
-            complete_future_with_error(future, err);
+            // complete_future_with_error(future, err);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::ClientError{ future, err });
         }
     };
     trace!("Append command finished");
@@ -125,7 +131,9 @@ async fn process_read_command(
             // complete_future_with_byte_array(future, buffers);
         }
         Err(err) => {
-            complete_future_with_error(future, err);
+            // complete_future_with_error(future, err);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::ClientError{ future, err });
         }
     };
     trace!("Read command finished");
@@ -136,10 +144,14 @@ async fn process_start_offset_command(stream: &mut Stream, future: GlobalRef) {
     let result = stream.start_offset().await;
     match result {
         Ok(offset) => {
-            complete_future_with_jlong(future, offset);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::StartOffset { future, offset});
+            // complete_future_with_jlong(future, offset);
         }
         Err(err) => {
-            complete_future_with_error(future, err);
+            // complete_future_with_error(future, err);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::ClientError{ future, err });
         }
     };
     trace!("Start_offset command finished");
@@ -150,10 +162,14 @@ async fn process_next_offset_command(stream: &mut Stream, future: GlobalRef) {
     let result = stream.next_offset().await;
     match result {
         Ok(offset) => {
-            complete_future_with_jlong(future, offset);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::NextOffset { future, offset});
+            // complete_future_with_jlong(future, offset);
         }
         Err(err) => {
-            complete_future_with_error(future, err);
+            // complete_future_with_error(future, err);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::ClientError{ future, err });
         }
     };
     trace!("Next_offset command finished");
@@ -182,10 +198,15 @@ async fn process_open_stream_command(
     match result {
         Ok(stream) => {
             let ptr = Box::into_raw(Box::new(stream)) as jlong;
-            complete_future_with_stream(future, ptr);
+            // complete_future_with_stream(future, ptr);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::OpenStream { future, ptr});
+            
         }
         Err(err) => {
-            complete_future_with_error(future, err);
+            // complete_future_with_error(future, err);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::ClientError{ future, err });
         }
     };
     trace!("Open_stream command finished");
@@ -207,10 +228,15 @@ async fn process_create_stream_command(
     let result = front_end.create(options).await;
     match result {
         Ok(stream_id) => {
-            complete_future_with_jlong(future, stream_id as i64);
+            // complete_future_with_jlong(future, stream_id as i64);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::CreateStream { future, stream_id: stream_id as i64  });
+            
         }
         Err(err) => {
-            complete_future_with_error(future, err);
+            // complete_future_with_error(future, err);
+            let tx = unsafe { CALLBACK_TX.get() }.unwrap();
+            let _ = tx.send(CallbackCommand::ClientError{ future, err });
         }
     };
     trace!("Create_stream command finished");
@@ -232,6 +258,33 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
     if unsafe { CALLBACK_TX.set(callback_tx) }.is_err() {
         error!("Failed to set callback channel sender");
     }
+    
+    let mut env = java_vm.get_env().unwrap();
+    let stream_path = "com/automq/elasticstream/client/jni/Stream";
+    let void_path = "java/lang/Void";
+    let jlong_path = "java/lang/Long";
+    let completable_future_path = "java/util/concurrent/CompletableFuture";
+    let stream_class = env.find_class(stream_path).unwrap();
+    let stream_class: GlobalRef = env.new_global_ref(stream_class).unwrap();
+    let stream_ctor = env.get_method_id(stream_path, "<init>", "(J)V").unwrap();
+
+    let void_class = env.find_class(void_path).unwrap();
+    let void_class: GlobalRef = env.new_global_ref(void_class).unwrap();
+    let void_ctor = env.get_method_id(void_path, "<init>", "()V").unwrap();
+    let jlong_class = env.find_class(jlong_path).unwrap();
+    let jlong_class: GlobalRef = env.new_global_ref(jlong_class).unwrap();
+    let jlong_ctor = env.get_method_id(jlong_path, "<init>", "(J)V").unwrap();
+    let future_complete_method = env
+        .get_method_id(completable_future_path, "complete", "(Ljava/lang/Object;)Z")
+        .unwrap();
+    unsafe { STREAM_CLASS_CACHE.set(stream_class).unwrap() };
+    unsafe { STREAM_CTOR_CACHE.set(stream_ctor).unwrap() };
+    unsafe { VOID_CLASS_CACHE.set(void_class).unwrap() };
+    unsafe { VOID_CTOR_CACHE.set(void_ctor).unwrap() };
+    unsafe { JLONG_CLASS_CACHE.set(jlong_class).unwrap() };
+    unsafe { JLONG_CTOR_CACHE.set(jlong_ctor).unwrap() };
+    unsafe { FUTURE_COMPLETE_CACHE.set(future_complete_method).unwrap() };
+
     let cpu_sum = num_cpus::get();
     (0..cpu_sum).for_each(|i| {
         let java_vm_clone = java_vm.clone();
@@ -242,18 +295,40 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
             JENV.with(|cell| {
                 if let Ok(env) = java_vm_clone.attach_current_thread_as_daemon() {
                     *cell.borrow_mut() = Some(env.get_raw());
-                }});
-            JAVA_VM.with(|cell| {
-                *cell.borrow_mut() = Some(java_vm_clone.clone());
+                } else {
+                    error!("Failed to attach current thread as daemon");
+                }
             });
             loop {
                 match callback_rx_clone.recv() {
                     Ok(command) => {
                         match command {
-                            CallbackCommand::Append { future, base_offset } => 
-                            complete_future_with_jlong(future, base_offset),
-                            CallbackCommand::Read { future, buffers } => 
-                            complete_future_with_byte_array(future, buffers),
+                            CallbackCommand::Append { future, base_offset } => {    
+                                let _stopwatch = Stopwatch::new("Append#callback");
+                                complete_future_with_jlong(future, base_offset);
+                            },
+                            CallbackCommand::Read { future, buffers } => {
+                                let _stopwatch = Stopwatch::new("Read#callback");
+                                complete_future_with_byte_array(future, buffers);
+                            }
+                            CallbackCommand::CreateStream { future, stream_id } => {
+                                complete_future_with_jlong(future, stream_id);
+                            },
+                            CallbackCommand::OpenStream { future, ptr } => {
+                                complete_future_with_stream(future, ptr);
+                            },
+                            CallbackCommand::StartOffset { future, offset } => {
+                                complete_future_with_jlong(future, offset);
+                            },
+                            CallbackCommand::NextOffset { future, offset } => {
+                                complete_future_with_jlong(future, offset);
+                            },
+                            CallbackCommand::CloseStream { future } => {
+                                complete_future_with_void(future);
+                            },
+                            CallbackCommand::ClientError { future, err } => {
+                                complete_future_with_error(future, err);
+                            },
                         }
                     },
                     Err(_) => {
@@ -269,40 +344,6 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
         .name("Runtime".to_string())
         .spawn(move || {
             trace!("JNI Runtime thread started");
-            JENV.with(|cell| {
-                if let Ok(mut env) = java_vm.attach_current_thread_as_daemon() {
-                    *cell.borrow_mut() = Some(env.get_raw());
-                    let stream_path = "com/automq/elasticstream/client/jni/Stream";
-                    let void_path = "java/lang/Void";
-                    let jlong_path = "java/lang/Long";
-                    let completable_future_path = "java/util/concurrent/CompletableFuture";
-                    let stream_class = env.find_class(stream_path).unwrap();
-                    let stream_class: GlobalRef = env.new_global_ref(stream_class).unwrap();
-                    let stream_ctor = env.get_method_id(stream_path, "<init>", "(J)V").unwrap();
-
-                    let void_class = env.find_class(void_path).unwrap();
-                    let void_class: GlobalRef = env.new_global_ref(void_class).unwrap();
-                    let void_ctor = env.get_method_id(void_path, "<init>", "()V").unwrap();
-                    let jlong_class = env.find_class(jlong_path).unwrap();
-                    let jlong_class: GlobalRef = env.new_global_ref(jlong_class).unwrap();
-                    let jlong_ctor = env.get_method_id(jlong_path, "<init>", "(J)V").unwrap();
-                    let future_complete_method = env
-                        .get_method_id(completable_future_path, "complete", "(Ljava/lang/Object;)Z")
-                        .unwrap();
-                    unsafe { STREAM_CLASS_CACHE.set(stream_class).unwrap() };
-                    unsafe { STREAM_CTOR_CACHE.set(stream_ctor).unwrap() };
-                    unsafe { VOID_CLASS_CACHE.set(void_class).unwrap() };
-                    unsafe { VOID_CTOR_CACHE.set(void_ctor).unwrap() };
-                    unsafe { JLONG_CLASS_CACHE.set(jlong_class).unwrap() };
-                    unsafe { JLONG_CTOR_CACHE.set(jlong_ctor).unwrap() };
-                    unsafe { FUTURE_COMPLETE_CACHE.set(future_complete_method).unwrap() };
-                } else {
-                    error!("Failed to attach current thread as daemon");
-                }
-            });
-            JAVA_VM.with(|cell| {
-                *cell.borrow_mut() = Some(java_vm.clone());
-            });
             tokio_uring::start(async move {
                 trace!("JNI tokio-uring runtime started");
                 loop {
