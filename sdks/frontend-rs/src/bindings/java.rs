@@ -1150,7 +1150,7 @@ fn complete_future_with_void(future: GlobalRef) {
         }
     });
 }
-
+#[allow(unused)]
 fn complete_future_with_byte_array(future: GlobalRef, buffers: Vec<Bytes>) {
     let total: usize = buffers.iter().map(|buf| buf.len()).sum();
     JENV.with(|cell| {
@@ -1205,26 +1205,21 @@ fn complete_future_with_direct_byte_buffer(future: GlobalRef, buffers: Vec<Bytes
             p += buf.len();
         });
         JENV.with(|cell| {
-                let mut env = get_thread_local_jenv(cell);
-                // # Safety
-                // Standard JNI call.
-                if let Ok(obj) = unsafe { env.new_direct_byte_buffer(ptr, total) } {
-                    call_future_complete_method(env, future, JObject::from(obj));
-                } else {
-                    complete_future_with_error(
-                        future,
-                        ClientError::Internal(
-                            "Failed to create a new direct_byte_buffer".to_string(),
-                        ),
-                    );
-                    error!("Failed to create a new direct_byte_buffer");
-                }
-            });
+            let mut env = get_thread_local_jenv(cell);
+            // # Safety
+            // Standard JNI call.
+            if let Ok(obj) = unsafe { env.new_direct_byte_buffer(ptr, total) } {
+                call_future_complete_method(env, future, JObject::from(obj));
+            } else {
+                complete_future_with_error(
+                    future,
+                    ClientError::Internal("Failed to create a new direct_byte_buffer".to_string()),
+                );
+                error!("Failed to create a new direct_byte_buffer");
+            }
+        });
     } else {
-        complete_future_with_error(
-            future,
-            ClientError::Internal("Bad alignment".to_string()),
-        );
+        complete_future_with_error(future, ClientError::Internal("Bad alignment".to_string()));
         error!("Bad alignment");
     }
 }
