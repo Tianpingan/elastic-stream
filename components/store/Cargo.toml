@@ -34,6 +34,7 @@ rocksdb = { workspace = true }
 lazy_static = {version = "1.4.0"}
 minstant = { workspace = true }
 observation = {path = "../observation"}
+minitrace = {workspace = true}
 
 [dev-dependencies]
 cargo-llvm-cov = { workspace = true }

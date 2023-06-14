@@ -11,3 +11,8 @@ prometheus = {workspace = true}
 sysinfo = "0.29.0"
 procfs = "0.15.1"
 log = { workspace = true }
+minitrace = { workspace = true }
+minitrace-jaeger = "0.4.1"
+tokio = {workspace = true}
+tokio-uring = {workspace = true}
+chrono = {workspace = true}

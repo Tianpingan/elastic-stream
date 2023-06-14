@@ -885,6 +885,7 @@ dependencies = [
  "lazy_static",
  "log",
  "log4rs",
+ "minitrace",
  "minstant",
  "mockall",
  "model",
@@ -2109,11 +2110,16 @@ dependencies = [
 name = "observation"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "lazy_static",
  "log",
+ "minitrace",
+ "minitrace-jaeger",
  "procfs",
  "prometheus",
  "sysinfo",
+ "tokio",
+ "tokio-uring",
 ]
 
 [[package]]
@@ -2922,6 +2928,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
+ "minitrace",
  "minstant",
  "model",
  "nix",

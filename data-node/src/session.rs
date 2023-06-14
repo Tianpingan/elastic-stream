@@ -2,11 +2,13 @@ use std::{
     cell::{RefCell, UnsafeCell},
     net::SocketAddr,
     rc::Rc,
-    sync::Arc,
+    sync::Arc, time::Duration,
 };
 
 use config::Configuration;
 use log::{info, trace, warn};
+use minitrace::future::FutureExt;
+use observation::tracing:: TracingService;
 use store::ElasticStore;
 use tokio::sync::mpsc;
 use tokio_uring::net::TcpStream;
@@ -84,6 +86,7 @@ impl Session {
             Arc::clone(&server_config),
             Rc::clone(&connection_tracker),
         );
+        let tracing_service = TracingService::new(Duration::from_micros(0));
 
         // Coroutine to read requests from network connection
         let _channel = Rc::clone(&channel);
@@ -104,7 +107,9 @@ impl Session {
                             store,
                             stream_manager,
                         };
+                        let tracer = tracing_service.new_tracer("root");
                         tokio_uring::spawn(async move {
+                            let _guard = tracer.set_local_parent();
                             server_call.call().await;
                         });
                     }

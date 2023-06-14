@@ -18,6 +18,7 @@ use crate::{
 use bytes::Bytes;
 use codec::frame::Frame;
 use log::{trace, warn};
+use minitrace::{Span, future::FutureExt};
 use protocol::rpc::header::{StatusT, SystemErrorT};
 use std::{cell::UnsafeCell, rc::Rc};
 use store::ElasticStore;
@@ -47,6 +48,7 @@ impl ServerCall {
     ///
     /// Delegate each incoming request to its dedicated `on_xxx` method according to
     /// operation code.
+    #[minitrace::trace("ServerCall.call()")]
     pub async fn call(&mut self) {
         trace!(
             "Receive a request. stream-id={}, opcode={}",

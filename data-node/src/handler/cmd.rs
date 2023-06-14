@@ -2,6 +2,7 @@ use std::{cell::UnsafeCell, fmt, rc::Rc};
 
 use codec::frame::{Frame, OperationCode};
 use log::error;
+use minitrace::{Span, future::FutureExt};
 use protocol::rpc::header::ErrorCode;
 use store::ElasticStore;
 
@@ -93,7 +94,7 @@ impl<'a> Command<'a> {
             }
         }
     }
-
+    #[minitrace::trace("Command.apply()")]
     pub(crate) async fn apply(
         &self,
         store: Rc<ElasticStore>,

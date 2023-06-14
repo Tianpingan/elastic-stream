@@ -41,6 +41,7 @@ util = {path = "../components/util"}
 lazy_static = {version = "1.4.0"}
 prometheus = {workspace = true}
 observation = {path = "../components/observation"}
+minitrace = { workspace = true }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"

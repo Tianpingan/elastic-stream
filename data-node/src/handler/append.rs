@@ -5,6 +5,7 @@ use chrono::prelude::*;
 use flatbuffers::FlatBufferBuilder;
 use futures::future::join_all;
 use log::{error, trace, warn};
+use minitrace::{Span, future::FutureExt};
 use model::payload::Payload;
 use protocol::rpc::header::{AppendResponseArgs, AppendResultEntryArgs, ErrorCode, StatusArgs};
 use std::{cell::UnsafeCell, fmt, rc::Rc};
@@ -61,6 +62,7 @@ impl Append {
     ///
     /// `response` - Mutable response frame reference, into which required business data are filled.
     ///
+    #[minitrace::trace("Append.apply()")]
     pub(crate) async fn apply(
         &self,
         store: Rc<ElasticStore>,
@@ -103,7 +105,7 @@ impl Append {
                         return Err(AppendError::RangeNotFound);
                     }
                     let options = WriteOptions::default();
-                    let append_result = store.append(options, req.clone()).await?;
+                    let append_result = store.append(options, req.clone()).in_span(Span::enter_with_local_parent("ElasticStore.append()")).await?;
                     Ok(append_result)
                 };
                 Box::pin(result)
