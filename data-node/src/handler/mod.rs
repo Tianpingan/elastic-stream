@@ -18,7 +18,6 @@ use crate::{
 use bytes::Bytes;
 use codec::frame::Frame;
 use log::{trace, warn};
-use minitrace::{Span, future::FutureExt};
 use protocol::rpc::header::{StatusT, SystemErrorT};
 use std::{cell::UnsafeCell, rc::Rc};
 use store::ElasticStore;

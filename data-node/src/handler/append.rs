@@ -5,7 +5,7 @@ use chrono::prelude::*;
 use flatbuffers::FlatBufferBuilder;
 use futures::future::join_all;
 use log::{error, trace, warn};
-use minitrace::{Span, future::FutureExt};
+use minitrace::{future::FutureExt, Span};
 use model::payload::Payload;
 use protocol::rpc::header::{AppendResponseArgs, AppendResultEntryArgs, ErrorCode, StatusArgs};
 use std::{cell::UnsafeCell, fmt, rc::Rc};
@@ -105,7 +105,10 @@ impl Append {
                         return Err(AppendError::RangeNotFound);
                     }
                     let options = WriteOptions::default();
-                    let append_result = store.append(options, req.clone()).in_span(Span::enter_with_local_parent("ElasticStore.append()")).await?;
+                    let append_result = store
+                        .append(options, req.clone())
+                        .in_span(Span::enter_with_local_parent("ElasticStore.append()"))
+                        .await?;
                     Ok(append_result)
                 };
                 Box::pin(result)

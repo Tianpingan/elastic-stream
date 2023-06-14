@@ -54,13 +54,8 @@ impl TracingService {
                         trace_id += 1;
                         let service_name = service_name.clone();
                         tokio::spawn(async move {
-                            Self::report_tracing(
-                                threshold,
-                                collector,
-                                service_name,
-                                trace_id,
-                            )
-                            .await;
+                            Self::report_tracing(threshold, collector, service_name, trace_id)
+                                .await;
                         });
                     }
                     None => {

@@ -4,7 +4,7 @@ use codec::frame::Frame;
 use flatbuffers::FlatBufferBuilder;
 use futures::{future, Future};
 use log::{trace, warn};
-use minitrace::{Span, future::FutureExt};
+use minitrace::{future::FutureExt, Span};
 use minstant::Instant;
 use protocol::rpc::header::{
     ErrorCode, FetchRequest, FetchResponse, FetchResponseArgs, FetchResultEntry,
@@ -62,7 +62,11 @@ impl<'a> Fetch<'a> {
         let futures = store_requests
             .into_iter()
             .map(|fetch_option| match fetch_option {
-                Ok(fetch_option) => Box::pin(store.fetch(fetch_option).in_span(Span::enter_with_local_parent("ElasticStore.fetch()")))
+                Ok(fetch_option) => Box::pin(
+                    store
+                        .fetch(fetch_option)
+                        .in_span(Span::enter_with_local_parent("ElasticStore.fetch()")),
+                )
                     as Pin<Box<dyn Future<Output = Result<store::FetchResult, FetchError>>>>,
                 Err(fetch_err) => {
                     let res: Result<store::FetchResult, FetchError> = Err(fetch_err);

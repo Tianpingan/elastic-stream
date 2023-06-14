@@ -2,13 +2,13 @@ use std::{
     cell::{RefCell, UnsafeCell},
     net::SocketAddr,
     rc::Rc,
-    sync::Arc, time::Duration,
+    sync::Arc,
+    time::Duration,
 };
 
 use config::Configuration;
 use log::{info, trace, warn};
-use minitrace::future::FutureExt;
-use observation::tracing:: TracingService;
+use observation::tracing::TracingService;
 use store::ElasticStore;
 use tokio::sync::mpsc;
 use tokio_uring::net::TcpStream;
