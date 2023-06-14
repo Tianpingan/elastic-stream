@@ -4,8 +4,8 @@ use bytes::Bytes;
 use jni::objects::GlobalRef;
 use tokio::sync::oneshot;
 
-use crate::{ClientError, Frontend, Stream};
 use super::tracing::Tracer;
+use crate::{ClientError, Frontend, Stream};
 
 pub enum Command<'a> {
     GetFrontend {

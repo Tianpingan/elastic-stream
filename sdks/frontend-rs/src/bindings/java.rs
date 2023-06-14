@@ -3,8 +3,8 @@ use jni::objects::{GlobalRef, JClass, JMethodID, JObject, JString, JValue, JValu
 use jni::sys::{jint, jlong, JNINativeInterface_, JNI_VERSION_1_8};
 use jni::{JNIEnv, JavaVM};
 use log::{error, info, trace};
-use minitrace::Span;
 use minitrace::future::FutureExt;
+use minitrace::Span;
 use std::alloc::Layout;
 use std::cell::{OnceCell, RefCell};
 use std::ffi::c_void;
