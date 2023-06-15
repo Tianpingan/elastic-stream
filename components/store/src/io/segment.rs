@@ -523,7 +523,7 @@ mod tests {
         buf::{AlignedBuf, AlignedBufWriter},
         record::RecordType,
     };
-    use bytes::{BytesMut, BufMut};
+    use bytes::{BufMut, BytesMut};
     use rand::RngCore;
     use std::{
         error::Error,
