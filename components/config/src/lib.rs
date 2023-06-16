@@ -227,6 +227,9 @@ pub struct Store {
 
     #[serde(rename = "total-segment-file-size")]
     pub total_segment_file_size: u64,
+
+    #[serde(rename = "enable-segment-file-recycle")]
+    pub enable_segment_file_recycle: bool,
 }
 
 impl Default for Store {
@@ -243,6 +246,7 @@ impl Default for Store {
             uring: Uring::default(),
             rocksdb: RocksDB::default(),
             total_segment_file_size: u64::MAX,
+            enable_segment_file_recycle: false,
         }
     }
 }
