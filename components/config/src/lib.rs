@@ -464,7 +464,7 @@ impl Configuration {
 
 #[cfg(test)]
 mod tests {
-    use serde::{Serialize, Deserialize};
+    use serde::{Deserialize, Serialize};
 
     use super::Configuration;
     use std::{error::Error, fs::File, io::Read, path::Path};
@@ -510,16 +510,14 @@ mod tests {
     }
 
     #[test]
-    fn test_reclaim_policy()-> Result<(), Box<dyn Error>> {
-        let s =
-        r#"
+    fn test_reclaim_policy() -> Result<(), Box<dyn Error>> {
+        let s = r#"
             reclaim_policy: "Delete"
         "#;
         let foo: Foo = serde_yaml::from_str(s)?;
         assert_eq!(super::ReclaimSegmentFilePolicy::Delete, foo.reclaim_policy);
 
-        let s =
-        r#"
+        let s = r#"
             reclaim_policy: "Recycle"
         "#;
         let foo: Foo = serde_yaml::from_str(s)?;
