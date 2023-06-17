@@ -296,7 +296,7 @@ impl Wal {
             .filter(|segment| segment.status == Status::Recycled)
             .is_some();
 
-        if self.config.store.enable_segment_file_recycle && exist_recycled_segment_file {
+        if self.config.store.reclaim_policy.is_recycle() && exist_recycled_segment_file {
             // Since there exists a recycled segment file, we can reuse it by renaming it.
             segment.status = Status::RenameAt;
 
@@ -627,7 +627,7 @@ impl Wal {
 
     fn on_file_op_completion(&mut self, offset: u64, result: i32) -> Result<(), StoreError> {
         let mut to_remove = vec![];
-        let recycled = self.config.store.enable_segment_file_recycle;
+        let recycled = self.config.store.reclaim_policy.is_recycle();
         if let Some(segment) = self.segment_file_of(offset) {
             if -1 == result {
                 error!("LogSegment file operation failed: {}", segment);

@@ -194,6 +194,32 @@ impl Default for Path {
     }
 }
 
+/// Policy to reclaim segment files once store takes up more space than the configured threshold.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum ReclaimSegmentFilePolicy {
+    /// Delete the oldest segment files.
+    Delete,
+
+    /// Recycle the oldest segment files.
+    Recycle,
+}
+
+impl ReclaimSegmentFilePolicy {
+    pub fn is_delete(&self) -> bool {
+        matches!(self, ReclaimSegmentFilePolicy::Delete)
+    }
+
+    pub fn is_recycle(&self) -> bool {
+        matches!(self, ReclaimSegmentFilePolicy::Recycle)
+    }
+}
+
+impl Default for ReclaimSegmentFilePolicy {
+    fn default() -> Self {
+        Self::Delete
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Store {
     #[serde(rename = "mkdirs-if-missing")]
@@ -228,8 +254,8 @@ pub struct Store {
     #[serde(rename = "total-segment-file-size")]
     pub total_segment_file_size: u64,
 
-    #[serde(rename = "enable-segment-file-recycle")]
-    pub enable_segment_file_recycle: bool,
+    #[serde(rename = "reclaim-policy")]
+    pub reclaim_policy: ReclaimSegmentFilePolicy,
 }
 
 impl Default for Store {
@@ -246,7 +272,7 @@ impl Default for Store {
             uring: Uring::default(),
             rocksdb: RocksDB::default(),
             total_segment_file_size: u64::MAX,
-            enable_segment_file_recycle: false,
+            reclaim_policy: ReclaimSegmentFilePolicy::default(),
         }
     }
 }
