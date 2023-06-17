@@ -464,6 +464,8 @@ impl Configuration {
 
 #[cfg(test)]
 mod tests {
+    use serde::{Serialize, Deserialize};
+
     use super::Configuration;
     use std::{error::Error, fs::File, io::Read, path::Path};
 
@@ -500,5 +502,29 @@ mod tests {
             set.insert(client_id);
         }
         assert_eq!(100, set.len());
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct Foo {
+        pub reclaim_policy: super::ReclaimSegmentFilePolicy,
+    }
+
+    #[test]
+    fn test_reclaim_policy()-> Result<(), Box<dyn Error>> {
+        let s =
+        r#"
+            reclaim_policy: "Delete"
+        "#;
+        let foo: Foo = serde_yaml::from_str(s)?;
+        assert_eq!(super::ReclaimSegmentFilePolicy::Delete, foo.reclaim_policy);
+
+        let s =
+        r#"
+            reclaim_policy: "Recycle"
+        "#;
+        let foo: Foo = serde_yaml::from_str(s)?;
+        assert_eq!(super::ReclaimSegmentFilePolicy::Recycle, foo.reclaim_policy);
+
+        Ok(())
     }
 }
