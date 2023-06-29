@@ -1354,6 +1354,7 @@ impl IO {
                 if io.borrow().wal.writable_segment_count() > min_preallocated_segment_files {
                     break;
                 }
+                // 这里需要将错误传递吗？
                 io.borrow_mut().wal.try_open_segment()?;
             }
 

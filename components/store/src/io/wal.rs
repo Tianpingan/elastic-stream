@@ -321,38 +321,48 @@ impl Wal {
             self.segments.push_back(segment);
             Ok(())
         } else {
-            let status = segment.status;
-            self.inflight_control_tasks.insert(offset, status);
-            let sqe = opcode::OpenAt::new(types::Fd(libc::AT_FDCWD), segment.path.as_ptr())
-                .flags(libc::O_CREAT | libc::O_RDWR | libc::O_DIRECT)
-                .mode(libc::S_IRWXU | libc::S_IRWXG)
-                .build()
-                .user_data(offset);
-            unsafe {
-                self.control_ring.submission().push(&sqe).map_err(|e| {
-                    error!("Failed to push OpenAt SQE to submission queue: {:?}", e);
-                    StoreError::IoUring
-                })?
-            };
-            self.segments.push_back(segment);
-            Ok(())
+            // 还能创建，则创。
+            if !self.is_full() {
+                let status = segment.status;
+                self.inflight_control_tasks.insert(offset, status);
+                let sqe = opcode::OpenAt::new(types::Fd(libc::AT_FDCWD), segment.path.as_ptr())
+                    .flags(libc::O_CREAT | libc::O_RDWR | libc::O_DIRECT)
+                    .mode(libc::S_IRWXU | libc::S_IRWXG)
+                    .build()
+                    .user_data(offset);
+                unsafe {
+                    self.control_ring.submission().push(&sqe).map_err(|e| {
+                        error!("Failed to push OpenAt SQE to submission queue: {:?}", e);
+                        StoreError::IoUring
+                    })?
+                };
+                self.segments.push_back(segment);
+                Ok(())
+            } else {
+                Err(StoreError::DiskFull("todo: disk full msg".to_string()))
+            }
         }
     }
-
-    pub(crate) fn check_expired_segment(&mut self) {
+    pub(crate) fn mock_check(segment: &LogSegment) -> bool {
+        // TODO: s3, ttl
+        true
+    }
+    pub(crate) fn is_full(&self) -> bool {
         let max_segment_file_num =
             self.config.store.total_segment_file_size / self.config.store.segment_size;
-        let cur_segment_file_num = self
-            .segments
-            .iter()
-            .filter(|segment| segment.status == Status::Read)
-            .count() as u64;
-        if cur_segment_file_num > max_segment_file_num {
-            self.segments
-                .iter_mut()
-                .filter(|segment| segment.status == Status::Read)
-                .take((cur_segment_file_num - max_segment_file_num) as usize)
-                .for_each(|segment| segment.status = Status::Close);
+        let cur_segment_file_num = self.segments.len() as u64;
+        cur_segment_file_num < max_segment_file_num
+    }
+    pub(crate) fn check_expired_segment(&mut self) {
+        if self.is_full() {
+            let segment = self.segments.iter_mut().find(|segment| segment.status == Status::Read);
+            if let Some(segment) = segment {
+                if Self::mock_check(segment) {
+                    // 可以删
+                    segment.status = Status::Close;
+                    // Close -> Delete || Close -> Recycle
+                } 
+            }
         }
     }
 

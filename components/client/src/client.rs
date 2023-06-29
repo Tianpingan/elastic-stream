@@ -280,6 +280,10 @@ impl Client {
             )
             .await
     }
+
+    pub async fn trim() -> Result<(), ClientError> {
+        Ok(())
+    } 
 }
 
 #[cfg(test)]

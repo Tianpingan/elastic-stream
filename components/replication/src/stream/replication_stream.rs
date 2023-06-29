@@ -434,6 +434,8 @@ impl ReplicationStream {
 
     pub async fn trim(&self, _new_start_offset: u64) -> Result<(), ReplicationError> {
         // TODO
+        let client = self.client.upgrade().ok_or(ReplicationError::Internal)?;
+        // 1. report to pm?
         Ok(())
     }
 }
