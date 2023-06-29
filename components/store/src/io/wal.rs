@@ -137,7 +137,9 @@ impl Wal {
             segment.wal_offset <= offset && (segment.wal_offset + segment.size > offset)
         })
     }
-
+    pub(crate) fn last_wal_offset(&self) -> u64 {
+        self.segments.back().and_then(|segment| Some(segment.wal_offset)).unwrap_or(0)
+    }
     /// Return whether has reached end of the WAL
     fn scan_record(
         segment: &mut LogSegment,

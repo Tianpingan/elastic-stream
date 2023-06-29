@@ -1346,12 +1346,14 @@ impl IO {
 
         let min_preallocated_segment_files =
             io.borrow().options.store.pre_allocate_segment_file_number;
-
+        let total_segment_file_size = io.borrow().options.store.total_segment_file_size;
         // Main loop
         loop {
             // Check if we need to create a new log segment
             loop {
-                if io.borrow().wal.writable_segment_count() > min_preallocated_segment_files {
+                // 创建的条件：目前read write的数目小于min_preallocated_segment_files
+                // 或者，当前的wal的segment file依旧小于等于total
+                if io.borrow().wal.writable_segment_count() > min_preallocated_segment_files && io.borrow().wal.last_wal_offset() >= total_segment_file_size {
                     break;
                 }
                 io.borrow_mut().wal.try_open_segment()?;

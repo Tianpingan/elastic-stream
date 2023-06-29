@@ -1,7 +1,7 @@
 use std::{
     process,
     sync::atomic::{AtomicUsize, Ordering},
-    time::Duration,
+    time::Duration, io::{Seek, SeekFrom, Write},
 };
 
 use error::ConfigurationError;
@@ -470,6 +470,24 @@ impl Configuration {
             stat::stat(wal.as_path()).map_err(|e| ConfigurationError::System(e as i32))?;
         self.store.alignment = file_stat.st_blksize as usize;
         self.store.blocks = file_stat.st_blocks as u64;
+
+        // To allocate segment file
+        // let path = wal;
+        // let mut cur_offset = 0;
+        // loop {
+        //     let offset = 0;
+        //     let path = path.join(format!("{:0>20}", offset));
+        //     // 创建一个新文件，并打开它以进行写入
+        //     let mut file = std::fs::File::create(path)?;
+        //     // 将文件指针移动到指定位置
+        //     file.seek(SeekFrom::Start(self.store.segment_size - 1))?;
+        //     // 写入一个字节到文件末尾，达到预分配空间的效果
+        //     file.write_all(&[0])?;
+        //     cur_offset += self.store.segment_size;
+        //     if cur_offset >= self.store.total_segment_file_size {
+        //         break;
+        //     }
+        // }
 
         let metadata = base.join(&self.store.path.metadata);
         if !metadata.exists() {
