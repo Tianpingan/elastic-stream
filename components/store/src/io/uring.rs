@@ -1345,11 +1345,14 @@ impl IO {
         let min_preallocated_segment_files =
             io.borrow().options.store.pre_allocate_segment_file_number;
 
+        let total_segment_files = io.borrow().options.store.total_segment_file_size;
         // Main loop
         loop {
             // Check if we need to create a new log segment
             loop {
-                if io.borrow().wal.writable_segment_count() > min_preallocated_segment_files {
+                if io.borrow().wal.writable_segment_count() > min_preallocated_segment_files
+                    && io.borrow().wal.last_wal_offset() >= total_segment_files
+                {
                     break;
                 }
                 io.borrow_mut().wal.try_open_segment()?;
