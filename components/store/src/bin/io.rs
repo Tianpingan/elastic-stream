@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut fd = 0;
     // Create file
     {
-        let file_name = "/mnt/abc.txt".to_owned();
+        let file_name = "/home/tpa/abc.txt".to_owned();
         let open_at_e = opcode::OpenAt::new(
             types::Fd(libc::AT_FDCWD),
             file_name.as_ptr() as *const libc::c_char,

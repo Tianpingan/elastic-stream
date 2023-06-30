@@ -40,7 +40,7 @@ server:
     report-interval: 3000
     # Path to save flamegraph files: if a relative path is configured, it will be relative to current working directory;
     # If an absolute path is configured, the absolute path is used.
-    report-path: "/tmp"
+    report-path: "/home/tpa/tmp"
     # max backup reports
     max-report-backup: 3
 # Store configuration
@@ -50,7 +50,7 @@ store:
   # Store directory
   path:
     # Base path of the store, containing lock, immutable properties and other configuration files
-    base: "/data/store"
+    base: "/home/tpa/data/store"
     # Directory of WAL segment files. It could be absolute or relative to `base`
     wal: "wal"
     # Directory of metadata RocksDB files. It could be absolute or relative to `base`

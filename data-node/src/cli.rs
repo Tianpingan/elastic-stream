@@ -37,6 +37,7 @@ impl Cli {
 
     pub fn create_config(&self) -> anyhow::Result<Configuration> {
         let path = Path::new(&self.config);
+        println!("path = {:?}", path);
         if !path.exists() {
             eprintln!(
                 "The specified configuration file `{}` does not exist",
@@ -45,11 +46,12 @@ impl Cli {
             // Exit with errno set
             std::process::exit(2);
         }
-
+        println!("path = {:?}", path);
         let config_file = File::open(path)?;
         let mut configuration: Configuration = serde_yaml::from_reader(config_file)?;
+        println!("path = {:?}", path);
         configuration.check_and_apply()?;
-
+        println!("path = {:?}", path);
         Ok(configuration)
     }
 }
