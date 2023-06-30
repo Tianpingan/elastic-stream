@@ -124,6 +124,31 @@ impl Wal {
         // Sort log segment file by file name.
         segment_files.sort();
 
+        // Preallocate segment files until they reach the maximum number specified in the configuration file.
+        let next_wal_offset = segment_files
+            .last()
+            .and_then(|segment| Some(segment.wal_offset + segment.size))
+            .unwrap_or(0);
+
+        let iter = std::iter::successors(Some(next_wal_offset), |&offset| {
+            Some(offset + self.config.store.segment_size)
+        })
+        .take_while(|&offset| {
+            offset + self.config.store.segment_size <= self.config.store.total_segment_file_size
+        });
+
+        for offset in iter {
+            let log_segment_file = LogSegment::new(
+                &self.config,
+                offset,
+                self.config.store.segment_size,
+                wal_path.join(LogSegment::format(offset)).as_path(),
+            );
+            if let Ok(log_segment_file) = log_segment_file {
+                segment_files.push(log_segment_file);
+            }
+        }
+
         for mut segment_file in segment_files.into_iter() {
             segment_file.open()?;
             self.segments.push_back(segment_file);
