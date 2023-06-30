@@ -127,7 +127,7 @@ impl Wal {
         // Preallocate segment files until they reach the maximum number specified in the configuration file.
         let next_wal_offset = segment_files
             .last()
-            .and_then(|segment| Some(segment.wal_offset + segment.size))
+            .map(|segment| segment.wal_offset + segment.size)
             .unwrap_or(0);
 
         let iter = std::iter::successors(Some(next_wal_offset), |&offset| {
