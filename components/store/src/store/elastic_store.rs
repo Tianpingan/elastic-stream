@@ -21,13 +21,13 @@ use crate::{
     option::{ReadOptions, WriteOptions},
     AppendRecordRequest, AppendResult, FetchResult, Store,
 };
-use client::PlacementManagerIdGenerator;
+use client::PlacementDriverIdGenerator;
 use crossbeam::channel::Sender;
 use futures::future::join_all;
 use log::{error, trace};
 use model::range::RangeMetadata;
 use observation::metrics::store_metrics::{
-    DataNodeStatistics, STORE_APPEND_BYTES_COUNT, STORE_APPEND_COUNT,
+    RangeServerStatistics, STORE_APPEND_BYTES_COUNT, STORE_APPEND_COUNT,
     STORE_APPEND_LATENCY_HISTOGRAM, STORE_FAILED_APPEND_COUNT, STORE_FAILED_FETCH_COUNT,
     STORE_FETCH_BYTES_COUNT, STORE_FETCH_COUNT, STORE_FETCH_LATENCY_HISTOGRAM,
 };
@@ -64,12 +64,12 @@ impl ElasticStore {
         mut config: config::Configuration,
         recovery_completion_tx: oneshot::Sender<()>,
     ) -> Result<Self, StoreError> {
-        let id_generator = Box::new(PlacementManagerIdGenerator::new(&config));
+        let id_generator = Box::new(PlacementDriverIdGenerator::new(&config));
 
         let lock = Arc::new(Lock::new(&config, id_generator)?);
 
-        // Fill node_id
-        config.server.node_id = lock.id();
+        // Fill server_id
+        config.server.server_id = lock.id();
         let config = Arc::new(config);
 
         // Build wal offset manager
@@ -187,7 +187,7 @@ impl Store for ElasticStore {
             Ok(res) => {
                 let latency = now.elapsed();
                 STORE_APPEND_LATENCY_HISTOGRAM.observe(latency.as_micros() as f64);
-                DataNodeStatistics::observe_append_latency(latency.as_millis() as i16);
+                RangeServerStatistics::observe_append_latency(latency.as_millis() as i16);
                 STORE_APPEND_COUNT.inc();
                 STORE_APPEND_BYTES_COUNT.inc_by(len as u64);
                 res
@@ -266,7 +266,7 @@ impl Store for ElasticStore {
             STORE_FETCH_COUNT.inc();
             let latency = now.elapsed();
             STORE_FETCH_LATENCY_HISTOGRAM.observe(latency.as_micros() as f64);
-            DataNodeStatistics::observe_fetch_latency(latency.as_millis() as i16);
+            RangeServerStatistics::observe_fetch_latency(latency.as_millis() as i16);
             STORE_FETCH_BYTES_COUNT
                 .inc_by(final_result.iter().map(|re| re.total_len()).sum::<usize>() as u64);
             return Ok(FetchResult {
@@ -279,12 +279,12 @@ impl Store for ElasticStore {
         Err(FetchError::NoRecord)
     }
 
-    /// List ranges of all streams that are served by this data node.
+    /// List ranges of all streams that are served by this range server.
     ///
     /// Note this job is delegated to RocksDB threads.
     ///
     /// True that RocksDB may internally use asynchronous IO, but its public API is blocking and synchronous.
-    /// Given that we do NOT accept any blocking code in data-node and store crates, we have to delegate these
+    /// Given that we do NOT accept any blocking code in range-server and store crates, we have to delegate these
     /// tasks to RocksDB threads and asynchronously await in tokio::sync::mpsc::unbounded channel.
     ///
     /// This method involves communication between sync and async code, remember to read
@@ -308,7 +308,7 @@ impl Store for ElasticStore {
     /// List ranges of the specified stream.
     ///
     /// Rationale of delegating this job to RocksDB threads is exactly same to `list` ranges of all streams served by
-    /// this data node.
+    /// this range server.
     async fn list_by_stream<F>(
         &self,
         stream_id: i64,
@@ -391,9 +391,9 @@ mod tests {
         AppendRecordRequest, ElasticStore, Store,
     };
 
-    fn build_store(pm_address: &str, store_path: &str) -> ElasticStore {
+    fn build_store(pd_address: &str, store_path: &str) -> ElasticStore {
         let mut config = config::Configuration::default();
-        config.placement_manager = pm_address.to_owned();
+        config.placement_driver = pd_address.to_owned();
         config.store.path.set_base(store_path);
         config.check_and_apply().expect("Configuration is invalid");
         let (tx, rx) = oneshot::channel();
@@ -429,9 +429,9 @@ mod tests {
             });
         });
         let port = port_rx.await.unwrap();
-        let pm_address = format!("localhost:{}", port);
+        let pd_address = format!("localhost:{}", port);
         let _ = std::thread::spawn(move || {
-            let store = build_store(&pm_address, store_path.as_str());
+            let store = build_store(&pd_address, store_path.as_str());
             let send_r = tx.send(store);
             if let Err(_) = send_r {
                 panic!("Failed to send store");

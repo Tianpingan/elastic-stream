@@ -5,7 +5,7 @@ use std::{
 };
 
 use error::ConfigurationError;
-use model::DataNode;
+use model::RangeServer;
 use nix::sys::stat;
 use serde::{Deserialize, Serialize};
 pub mod error;
@@ -81,8 +81,8 @@ pub struct Client {
     #[serde(rename = "heartbeat-interval")]
     pub heartbeat_interval: u64,
 
-    #[serde(rename = "refresh-pm-cluster-interval")]
-    pub refresh_pm_cluster_interval: u64,
+    #[serde(rename = "refresh-pd-cluster-interval")]
+    pub refresh_pd_cluster_interval: u64,
 }
 
 impl Default for Client {
@@ -93,7 +93,7 @@ impl Default for Client {
             client_id: "".to_owned(),
             max_attempt: 3,
             heartbeat_interval: 30,
-            refresh_pm_cluster_interval: 300,
+            refresh_pd_cluster_interval: 300,
         }
     }
 }
@@ -134,9 +134,9 @@ pub struct Server {
     pub host: String,
     pub port: u16,
 
-    /// Data Node ID
+    /// Range Server ID
     #[serde(default)]
-    pub node_id: i32,
+    pub server_id: i32,
 
     #[serde(rename = "worker-cpu-set")]
     pub worker_cpu_set: String,
@@ -153,9 +153,9 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn data_node(&self) -> DataNode {
-        DataNode {
-            node_id: self.node_id,
+    pub fn range_server(&self) -> RangeServer {
+        RangeServer {
+            server_id: self.server_id,
             advertise_address: format!("{}:{}", self.host, self.port),
         }
     }
@@ -166,7 +166,7 @@ impl Default for Server {
         Self {
             host: "127.0.0.1".to_owned(),
             port: 10911,
-            node_id: 0,
+            server_id: 0,
             worker_cpu_set: String::from("0"),
             uring: Uring::default(),
             connection_idle_duration: 60,
@@ -398,8 +398,8 @@ pub struct Configuration {
     /// Unit of time in milliseconds.
     pub tick: u64,
 
-    #[serde(rename = "placement-manager")]
-    pub placement_manager: String,
+    #[serde(rename = "placement-driver")]
+    pub placement_driver: String,
 
     pub client: Client,
 
@@ -414,7 +414,7 @@ impl Default for Configuration {
     fn default() -> Self {
         Self {
             tick: 100,
-            placement_manager: "127.0.0.1:12378".to_owned(),
+            placement_driver: "127.0.0.1:12378".to_owned(),
             client: Default::default(),
             server: Default::default(),
             store: Default::default(),
@@ -506,8 +506,8 @@ impl Configuration {
         Duration::from_millis(self.tick * self.client.heartbeat_interval)
     }
 
-    pub fn client_refresh_placement_manager_cluster_interval(&self) -> Duration {
-        Duration::from_millis(self.tick * self.client.refresh_pm_cluster_interval)
+    pub fn client_refresh_placement_driver_cluster_interval(&self) -> Duration {
+        Duration::from_millis(self.tick * self.client.refresh_pd_cluster_interval)
     }
 
     pub fn server_grace_period(&self) -> Duration {
@@ -531,7 +531,7 @@ mod tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("etc/data-node.yaml");
+            .join("etc/range-server.yaml");
         let mut file = File::open(path.as_path())?;
         let mut content = String::new();
         file.read_to_string(&mut content)?;

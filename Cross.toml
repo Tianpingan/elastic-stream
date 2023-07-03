@@ -1,5 +1,10 @@
 [build]
-pre-build = ["apt-get update && apt-get install --assume-yes --no-install-recommends libclang-10-dev clang-10"]  # required by rocksdb
+pre-build = [
+    "apt-get update && apt-get install --assume-yes --no-install-recommends libclang-10-dev clang-10", # required by rocksdb
+]
 
 [build.env]
-passthrough = ["SKIP_FLATC=1"]
+passthrough = [
+    "SKIP_FLATC=1",
+    "ROCKSDB_COMPILE=1", # compile rocksdb from source
+]

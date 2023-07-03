@@ -1,4 +1,4 @@
-//! This module contains a trait and a simple implementation to generate unique ID for data node.
+//! This module contains a trait and a simple implementation to generate unique ID for range server.
 
 use log::{error, trace};
 use std::sync::Arc;
@@ -11,13 +11,13 @@ pub trait IdGenerator {
     fn generate(&self) -> Result<i32, ClientError>;
 }
 
-/// Generate unique ID across the whole cluster by placement manager.
+/// Generate unique ID across the whole cluster by placement driver.
 ///
-pub struct PlacementManagerIdGenerator {
+pub struct PlacementDriverIdGenerator {
     config: Arc<config::Configuration>,
 }
 
-impl PlacementManagerIdGenerator {
+impl PlacementDriverIdGenerator {
     pub fn new(config: &config::Configuration) -> Self {
         Self {
             config: Arc::new(config.clone()),
@@ -25,7 +25,7 @@ impl PlacementManagerIdGenerator {
     }
 }
 
-impl IdGenerator for PlacementManagerIdGenerator {
+impl IdGenerator for PlacementDriverIdGenerator {
     fn generate(&self) -> Result<i32, ClientError> {
         let (tx, rx) = oneshot::channel();
         let config = Arc::clone(&self.config);
@@ -36,14 +36,14 @@ impl IdGenerator for PlacementManagerIdGenerator {
             match client.allocate_id(&self.config.server.host).await {
                 Ok(id) => {
                     trace!(
-                        "Acquired ID={} for data-node[host={}]",
+                        "Acquired ID={} for range-server[host={}]",
                         id,
                         self.config.server.host
                     );
                     let _ = tx.send(Ok(id));
                 }
                 Err(e) => {
-                    error!("Failed to acquire ID for data-node. Cause: {:?}", e);
+                    error!("Failed to acquire ID for range-server. Cause: {:?}", e);
                     let _ = tx.send(Err(()));
                 }
             }
@@ -63,7 +63,7 @@ mod tests {
 
     use tokio::sync::oneshot;
 
-    use super::{IdGenerator, PlacementManagerIdGenerator};
+    use super::{IdGenerator, PlacementDriverIdGenerator};
 
     #[test]
     fn test_generate() -> Result<(), Box<dyn Error>> {
@@ -85,9 +85,9 @@ mod tests {
         let port = port_rx.blocking_recv().unwrap();
 
         let mut cfg = config::Configuration::default();
-        cfg.placement_manager = format!("localhost:{}", port);
+        cfg.placement_driver = format!("localhost:{}", port);
         let config = Arc::new(cfg);
-        let generator = PlacementManagerIdGenerator::new(&config);
+        let generator = PlacementDriverIdGenerator::new(&config);
         let id = generator.generate()?;
         assert_eq!(1, id);
         let _ = stop_tx.send(());

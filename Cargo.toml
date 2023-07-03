@@ -4,20 +4,22 @@
 # will _not_ propagate the feature `x` into `cmd`'s direct dependencies.
 resolver = "2"
 members = [
-    "components/config",
-    "components/codec",
-    "components/model",
-    "components/protocol",
     "components/client",
+    "components/codec",
+    "components/config",
+    "components/model",
+    "components/observation",
+    "components/polling",
+    "components/protocol",
     "components/replication",
-    "components/transport",
     "components/store",
-    "components/util",
     "components/test-util",
     "components/tool",
-    "components/observation",
-    "data-node",
-    "sdks/frontend-rs"
+    "components/transport",
+    "components/util",
+    "components/tiered-storage",
+    "range-server",
+    "sdks/frontend-rs",
 ]
 
 [workspace.dependencies]
@@ -31,13 +33,15 @@ chrono = "0.4"
 ctrlc = "3.2.5"
 core_affinity = "0.8"
 crc = "3.0"
-crc32fast = { version= "1.3", features = ["nightly"]}
+crc32fast = { version = "1.3", features = ["nightly"] }
 derivative = "2.2"
 futures = { version = "0.3" }
-itertools = {version = "0.10.5" }
+itertools = { version = "0.10.5" }
 lazy_static = "1.4"
 io-uring = "0.5"
-tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring.git", branch = "master", features = ["bytes"] }
+tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring.git", branch = "master", features = [
+    "bytes",
+] }
 tokio = { version = "1", features = ["sync", "time", "macros"] }
 tokio-util = "0.7"
 crossbeam = "0.8"
@@ -50,10 +54,13 @@ flatbuffers = { git = "https://github.com/google/flatbuffers.git", tag = "v23.3.
 
 libc = "0.2"
 nix = "0.26"
-moka = { version = "0.11", features = ["future"] }
+opendal = "0.38.0"
 
 # Logging
-log = { version = "0.4", features = ["max_level_trace", "release_max_level_warn"] }
+log = { version = "0.4", features = [
+    "max_level_trace",
+    "release_max_level_warn",
+] }
 env_logger = "0.10"
 log4rs = "1.2"
 
@@ -63,10 +70,11 @@ tracing-subscriber = "0.3"
 tracing-appender = "0.2"
 
 # RocksDB
-rocksdb = { git = "https://github.com/AutoMQ/rust-rocksdb.git", branch = "develop",  default-features = false, features = ["jemalloc"] }
+rocksdb = { git = "https://github.com/AutoMQ/rust-rocksdb.git", branch = "develop", default-features = false, features = [
+    "jemalloc",
+] }
 
 pprof = { version = "0.11", features = ["flamegraph"] }
-
 
 rand = { version = "0.8" }
 uuid = { version = "1.3", features = [

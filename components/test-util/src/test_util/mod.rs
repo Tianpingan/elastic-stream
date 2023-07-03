@@ -9,10 +9,10 @@ use log::{debug, error, info, trace, warn};
 use model::payload::Payload;
 use protocol::rpc::header::{
     AppendResponseT, AppendResultEntryT, CreateRangeRequest, CreateRangeResponseT,
-    CreateStreamRequest, CreateStreamResponseT, DescribePlacementManagerClusterRequest,
-    DescribePlacementManagerClusterResponseT, DescribeStreamRequest, DescribeStreamResponseT,
+    CreateStreamRequest, CreateStreamResponseT, DescribePlacementDriverClusterRequest,
+    DescribePlacementDriverClusterResponseT, DescribeStreamRequest, DescribeStreamResponseT,
     ErrorCode, HeartbeatRequest, HeartbeatResponseT, IdAllocationRequest, IdAllocationResponseT,
-    ListRangeRequest, ListRangeResponseT, PlacementManagerClusterT, PlacementManagerNodeT, RangeT,
+    ListRangeRequest, ListRangeResponseT, PlacementDriverClusterT, PlacementDriverNodeT, RangeT,
     ReportMetricsRequest, ReportMetricsResponseT, SealKind, SealRangeRequest, SealRangeResponseT,
     StatusT, StreamT,
 };
@@ -27,7 +27,9 @@ fn serve_heartbeat(request: &HeartbeatRequest, frame: &mut Frame) {
     let mut response = HeartbeatResponseT::default();
     response.client_id = request.client_id().map(|client_id| client_id.to_owned());
     response.client_role = request.client_role();
-    response.data_node = request.data_node().map(|dn| Box::new(dn.unpack()));
+    response.range_server = request
+        .range_server()
+        .map(|range_server| Box::new(range_server.unpack()));
     let mut status = StatusT::default();
     status.code = ErrorCode::OK;
     status.message = Some("OK".to_owned());
@@ -69,20 +71,20 @@ fn serve_list_ranges(request: &ListRangeRequest, frame: &mut Frame) {
     frame.header = Some(Bytes::copy_from_slice(buf));
 }
 
-fn serve_describe_placement_manager_cluster(
-    request: &DescribePlacementManagerClusterRequest,
+fn serve_describe_placement_driver_cluster(
+    request: &DescribePlacementDriverClusterRequest,
     frame: &mut Frame,
     port: u16,
 ) {
     trace!("Received: {:?}", request);
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-    let mut resp = DescribePlacementManagerClusterResponseT::default();
+    let mut resp = DescribePlacementDriverClusterResponseT::default();
     {
-        let mut cluster = PlacementManagerClusterT::default();
+        let mut cluster = PlacementDriverClusterT::default();
 
         cluster.nodes = (0..1)
             .map(|i| {
-                let mut node = PlacementManagerNodeT::default();
+                let mut node = PlacementDriverNodeT::default();
                 node.is_leader = i == 0;
                 node.name = format!("node-{}", i);
                 node.advertise_addr = format!("localhost:{}", port);
@@ -107,7 +109,9 @@ fn serve_report_metrics(request: &ReportMetricsRequest, frame: &mut Frame) {
     debug!("{:?}", request);
     frame.operation_code = OperationCode::ReportMetrics;
     let mut response = ReportMetricsResponseT::default();
-    response.data_node = request.data_node().map(|dn| Box::new(dn.unpack()));
+    response.range_server = request
+        .range_server()
+        .map(|range_server| Box::new(range_server.unpack()));
     let mut status = StatusT::default();
     status.code = ErrorCode::OK;
     status.message = Some("OK".to_owned());
@@ -192,24 +196,22 @@ pub async fn run_listener() -> u16 {
                                     }
                                 }
 
-                                OperationCode::DescribePlacementManager => {
+                                OperationCode::DescribePlacementDriver => {
                                     response_frame.operation_code =
-                                        OperationCode::DescribePlacementManager;
+                                        OperationCode::DescribePlacementDriver;
                                     if let Some(ref buf) = frame.header {
                                         match flatbuffers::root::<
-                                            DescribePlacementManagerClusterRequest,
+                                            DescribePlacementDriverClusterRequest,
                                         >(buf)
                                         {
-                                            Ok(request) => {
-                                                serve_describe_placement_manager_cluster(
-                                                    &request,
-                                                    &mut response_frame,
-                                                    port,
-                                                )
-                                            }
+                                            Ok(request) => serve_describe_placement_driver_cluster(
+                                                &request,
+                                                &mut response_frame,
+                                                port,
+                                            ),
                                             Err(e) => {
                                                 error!(
-                                                    "Failed to decode describe-placement-manager-request header: {:?}", e
+                                                    "Failed to decode describe-placement-driver-request header: {:?}", e
                                                 );
                                             }
                                         }
@@ -435,14 +437,14 @@ fn serve_seal_range(req: &SealRangeRequest, response_frame: &mut Frame) {
     response.status = Box::new(status_ok);
 
     match request.kind {
-        SealKind::DATA_NODE => {}
+        SealKind::RANGE_SERVER => {}
 
-        SealKind::PLACEMENT_MANAGER => {
+        SealKind::PLACEMENT_DRIVER => {
             if request.range.end < 0 {
                 let mut status_bad_request = StatusT::default();
                 status_bad_request.code = ErrorCode::BAD_REQUEST;
                 status_bad_request.message = Some(String::from(
-                    "end-offset should be non-negative in case of placement manager seal",
+                    "end-offset should be non-negative in case of placement driver seal",
                 ));
                 response.status = Box::new(status_bad_request);
             }
