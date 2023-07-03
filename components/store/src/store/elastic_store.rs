@@ -161,6 +161,7 @@ impl ElasticStore {
             observer,
             written_len: None,
         };
+        // self.wal_offset_manager
         let io_task = Write(task);
         if let Err(e) = self.io_tx.send(io_task) {
             if let Write(task) = e.0 {

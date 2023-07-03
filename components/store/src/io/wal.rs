@@ -230,6 +230,7 @@ impl Wal {
                         len: len as u32 + 8,
                         ext: HandleExt::BatchSize(entry.len),
                     };
+                    segment.temp_map.insert(range, offset + len as u64);
                     trace!("Index RecordBatch[stream-id={}, range={}, base-offset={}, wal-offset={}, len={}]",
                            stream_id, range, offset, handle.wal_offset, handle.len);
                     indexer.index(stream_id, range, offset, handle);
@@ -345,6 +346,13 @@ impl Wal {
     }
     pub(crate) fn mock_check(segment: &LogSegment) -> bool {
         // TODO: s3, ttl
+        /// 1. DataNode 需要额外记录 WAL segment 里面每个 range 在 segment 中的 end offset；
+        /// 在 WAL segment 需要回收/删除前，需要进行数据检查；
+        /// 若 segment  segment 里面 range 的数据已经大于 stream start offset 或者数据已经 offload 到 S3，则 segment 可以安全删除
+
+        /// logsegment 里面需要有 存有哪些range的 信息，并且这些range的last offset也要记录
+        /// 那么在判断logsegment可不可以删除时，就去枚举这些range信息，比较offset即可。
+        /// 
         true
     }
     pub(crate) fn is_full(&self) -> bool {

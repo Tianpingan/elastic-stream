@@ -12,7 +12,7 @@ use std::{
     },
     path::Path,
     sync::Arc,
-    time::SystemTime,
+    time::SystemTime, collections::HashMap,
 };
 
 use crate::{
@@ -74,7 +74,12 @@ pub(crate) struct LogSegment {
     /// The underlying descriptor of the log segment.
     /// Currently, it's a file descriptor with `O_DIRECT` flag.
     pub(crate) sd: Option<SegmentDescriptor>,
+
+    /// temp record the range index and the end offset
+    pub(crate) temp_map: HashMap<u32, u64>,
 }
+
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SegmentDescriptor {
@@ -194,6 +199,7 @@ impl LogSegment {
             status: Status::OpenAt,
             path: CString::new(path.as_os_str().as_bytes())
                 .map_err(|e| StoreError::InvalidPath(e.to_string()))?,
+            temp_map: HashMap::new(),
         })
     }
 

@@ -31,7 +31,7 @@ use tokio::sync::oneshot;
 
 use super::block_cache::{EntryRange, MergeRange};
 use super::buf::AlignedBuf;
-use super::segment::FOOTER_LENGTH;
+use super::segment::{FOOTER_LENGTH, LogSegment};
 use super::task::SingleFetchResult;
 use super::ReadTask;
 
@@ -957,7 +957,7 @@ impl IO {
                     // is allocated by Box itself, hence, there will no alignment issue at all.
                     let mut context = unsafe { Box::from_raw(ptr) };
                     let latency = context.start_time.elapsed();
-
+                    
                     // Log slow IO latency
                     if cqe.result() >= 0 {
                         let elapsed = latency.as_millis();
@@ -1288,6 +1288,8 @@ impl IO {
                 // TODO: A better way to build read index is needed.
                 if let Some(written_len) = task.written_len {
                     let wal_offset = written_pos - written_len as u64;
+                    let segment = self.wal.segment_file_of(wal_offset).unwrap();
+                    segment.temp_map.insert(task.range, task.offset as u64 + task.len as u64);
                     self.build_read_index(wal_offset, written_len, &task);
                     self.acknowledge_to_observer(wal_offset, task);
                 } else {
