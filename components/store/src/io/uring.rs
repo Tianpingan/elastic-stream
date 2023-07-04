@@ -1153,7 +1153,9 @@ impl IO {
             stream_id: task.stream_id,
             range_index: task.range,
             offset: task.offset,
+            last_offset_delta: task.len,
             wal_offset,
+            bytes_len: task.buffer.len() as u32,
         };
         trace!(
             "Ack `WriteTask` {{ stream-id: {}, offset: {} }}",
@@ -1513,7 +1515,7 @@ mod tests {
     use crate::offset_manager::WalOffsetManager;
     use bytes::BytesMut;
     use crossbeam::channel::Sender;
-    use log::trace;
+    use log::{info, trace};
     use model::record::flat_record::FlatRecordBatch;
     use model::record::RecordBatchBuilder;
     use std::cell::RefCell;
@@ -1587,9 +1589,8 @@ mod tests {
         let (recovery_completion_tx, recovery_completion_rx) = oneshot::channel();
 
         let handle = std::thread::spawn(move || {
-            let store_dir = random_store_dir().unwrap();
-            let store_dir = store_dir.as_path();
-            let _store_dir_guard = test_util::DirectoryRemovalGuard::new(store_dir);
+            let tmp_dir = tempfile::tempdir().unwrap();
+            let store_dir = tmp_dir.path();
             let mut io = io_creator(store_dir).unwrap();
 
             let sender = io
@@ -1601,7 +1602,7 @@ mod tests {
             let io = RefCell::new(io);
 
             let _ = super::IO::run(io, recovery_completion_tx);
-            println!("Module io stopped");
+            info!("Module io stopped");
         });
 
         if let Err(_) = recovery_completion_rx.blocking_recv() {
@@ -1614,16 +1615,11 @@ mod tests {
         return Ok((handle, sender));
     }
 
-    fn random_store_dir() -> Result<PathBuf, StoreError> {
-        test_util::create_random_path().map_err(|e| StoreError::IO(e))
-    }
-
     #[test]
     fn test_receive_io_tasks() -> Result<(), StoreError> {
-        test_util::try_init_log();
-        let store_dir = random_store_dir()?;
-        let store_dir = store_dir.as_path();
-        let _store_dir_guard = test_util::DirectoryRemovalGuard::new(store_dir);
+        crate::log::try_init_log();
+        let tmp_dir = tempfile::tempdir()?;
+        let store_dir = tmp_dir.path();
         let mut io = create_default_io(store_dir)?;
         let sender = io.sender.take().unwrap();
         let mut buffer = BytesMut::with_capacity(128);
@@ -1672,12 +1668,11 @@ mod tests {
 
     #[test]
     fn test_reserve_write_buffers() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
-        let store_path = test_util::create_random_path()?;
-        let _guard = test_util::DirectoryRemovalGuard::new(store_path.as_path());
+        crate::log::try_init_log();
+        let store_path = tempfile::tempdir()?;
 
         let file_size = 1024 * 1024;
-        let mut io = IOBuilder::new(store_path.clone())
+        let mut io = IOBuilder::new(store_path.path().to_path_buf())
             .segment_size(file_size)
             .max_cache_size(file_size)
             .build()?;
@@ -1761,10 +1756,9 @@ mod tests {
 
     #[test]
     fn test_build_sqe() -> Result<(), StoreError> {
-        test_util::try_init_log();
-        let store_dir = random_store_dir()?;
-        let store_dir = store_dir.as_path();
-        let _store_dir_guard = test_util::DirectoryRemovalGuard::new(store_dir);
+        crate::log::try_init_log();
+        let tmp_dir = tempfile::tempdir()?;
+        let store_dir = tmp_dir.path();
         let mut io = create_default_io(store_dir)?;
 
         io.wal.open_segment_directly()?;
@@ -1802,7 +1796,7 @@ mod tests {
 
     #[test]
     fn test_run_basic() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         let (handle, sender) = create_and_run_io(create_default_io)?;
         let records: Vec<_> = (0..16)
             .into_iter()
@@ -1822,7 +1816,7 @@ mod tests {
 
     #[test]
     fn test_run_on_small_io() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         let (handle, sender) = create_and_run_io(create_small_io)?;
         // Will cost at least 4K * 1024 = 4M bytes, which means at least 4 segments will be allocated
         // And the cache reclaim will be triggered since a small io only has 1M cache
@@ -1843,7 +1837,7 @@ mod tests {
 
     #[test]
     fn test_send_and_receive_half_page() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         let (handle, sender) = create_and_run_io(create_default_io)?;
         send_and_receive_with_records(sender.clone(), 0, 0, vec![create_random_bytes(199)]);
         drop(sender);
@@ -1853,11 +1847,11 @@ mod tests {
 
     #[test]
     fn test_recover() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         let (tx, rx) = oneshot::channel();
-        let store_dir = random_store_dir().unwrap();
+        let tmp_dir = tempfile::tempdir()?;
+        let store_dir = tmp_dir.path();
         // Delete the directory after restart and verification of `recover`.
-        let _store_dir_guard = test_util::DirectoryRemovalGuard::new(store_dir.as_path());
         let store_path = store_dir.as_os_str().to_os_string();
 
         let (recovery_completion_tx, recovery_completion_rx) = oneshot::channel();
@@ -1874,7 +1868,7 @@ mod tests {
             let io = RefCell::new(io);
 
             let _ = super::IO::run(io, recovery_completion_tx);
-            println!("Module io stopped");
+            info!("Module io stopped");
         });
 
         if let Err(_) = recovery_completion_rx.blocking_recv() {
@@ -1912,7 +1906,7 @@ mod tests {
         handle.join().map_err(|_| StoreError::AllocLogSegment)?;
 
         {
-            let mut io = create_default_io(store_dir.as_path()).unwrap();
+            let mut io = create_default_io(store_dir).unwrap();
             io.load()?;
             let pos = io.indexer.get_wal_checkpoint()?;
             io.recover(pos)?;
@@ -1924,7 +1918,7 @@ mod tests {
 
     #[test]
     fn test_multiple_run_with_random_bytes() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         let (handle, sender) = create_and_run_io(create_small_io)?;
         let mut records: Vec<_> = vec![];
         records.push(create_random_bytes(4096 - 8));
@@ -1953,7 +1947,7 @@ mod tests {
 
     #[test]
     fn test_run_with_random_bytes() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         let (handle, sender) = create_and_run_io(create_small_io)?;
         let mut records: Vec<_> = vec![];
         let count = 1000;

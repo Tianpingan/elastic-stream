@@ -5,8 +5,8 @@ use crate::{composite_session::CompositeSession, error::ClientError};
 use bytes::Bytes;
 use log::{error, trace, warn};
 use model::{
-    client_role::ClientRole, fetch::FetchRequestEntry, fetch::FetchResultEntry,
-    range::RangeMetadata, stream::StreamMetadata, AppendResultEntry, ListRangeCriteria,
+    client_role::ClientRole, range::RangeMetadata, request::fetch::FetchRequest,
+    response::fetch::FetchResultSet, stream::StreamMetadata, AppendResultEntry, ListRangeCriteria,
 };
 use observation::metrics::{
     store_metrics::RangeServerStatistics,
@@ -240,8 +240,8 @@ impl Client {
     pub async fn fetch(
         &self,
         target: &str,
-        request: FetchRequestEntry,
-    ) -> Result<FetchResultEntry, ClientError> {
+        request: FetchRequest,
+    ) -> Result<FetchResultSet, ClientError> {
         let session_manager = unsafe { &mut *self.session_manager.get() };
         let session = session_manager.get_composite_session(target).await?;
         let future = session.fetch(request);
@@ -284,6 +284,7 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    use crate::mocks::run_listener;
     use bytes::BytesMut;
     use log::trace;
     use model::client_role::ClientRole;
@@ -300,7 +301,6 @@ mod tests {
     };
     use protocol::rpc::header::SealKind;
     use std::{error::Error, sync::Arc};
-    use test_util::run_listener;
     use tokio::sync::broadcast;
 
     use crate::{
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_allocate_id() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 2378;
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_create_stream() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 12378;
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_describe_stream() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 12378;
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_create_range() -> Result<(), ClientError> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 12378;
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_create_range_range_server() -> Result<(), ClientError> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let placement_driver_port = 12378;
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_list_range_by_stream() -> Result<(), ListRangeError> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 2378;
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_list_range_by_range_server() -> Result<(), ListRangeError> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 2378;
@@ -523,7 +523,7 @@ mod tests {
     /// Test seal range server without end. This RPC is used when the single writer takes over a stream from a failed writer.
     #[test]
     fn test_seal_range_server() -> Result<(), ClientError> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 2378;
@@ -556,7 +556,7 @@ mod tests {
     /// Test seal range server with end. This RPC is used when the single writer takes over a stream from a graceful closed writer.
     #[test]
     fn test_seal_range_server_with_end() -> Result<(), ClientError> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 2378;
@@ -589,7 +589,7 @@ mod tests {
     /// Test seal placement driver.
     #[test]
     fn test_seal_placement_driver() -> Result<(), ClientError> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 2378;
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn test_append() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 2378;
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn test_report_metrics() -> Result<(), ClientError> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 2378;

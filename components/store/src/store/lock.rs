@@ -108,23 +108,20 @@ impl Drop for Lock {
 
 #[cfg(test)]
 mod tests {
-    use client::PlacementDriverIdGenerator;
-    use tokio::sync::oneshot;
-
     use super::Lock;
+    use crate::mocks::run_listener;
+    use client::PlacementDriverIdGenerator;
     use std::{error::Error, sync::Arc};
+    use tokio::sync::oneshot;
 
     #[test]
     fn test_lock_normal() -> Result<(), Box<dyn Error>> {
-        let store_base = test_util::create_random_path()?;
-        let _guard = test_util::DirectoryRemovalGuard::new(store_base.as_path());
-
         let (stop_tx, stop_rx) = oneshot::channel();
         let (port_tx, port_rx) = oneshot::channel();
 
         let handle = std::thread::spawn(move || {
             tokio_uring::start(async {
-                let port = test_util::run_listener().await;
+                let port = run_listener().await;
                 let _ = port_tx.send(port);
                 let _ = stop_rx.await;
             });

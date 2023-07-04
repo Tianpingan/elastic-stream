@@ -6,8 +6,8 @@ use itertools::Itertools;
 use local_sync::oneshot;
 use log::{debug, error, info, trace, warn};
 use model::{
-    client_role::ClientRole, fetch::FetchRequestEntry, fetch::FetchResultEntry,
-    range::RangeMetadata, stream::StreamMetadata, AppendResultEntry, ListRangeCriteria,
+    client_role::ClientRole, range::RangeMetadata, request::fetch::FetchRequest,
+    response::fetch::FetchResultSet, stream::StreamMetadata, AppendResultEntry, ListRangeCriteria,
     PlacementDriverNode,
 };
 use observation::metrics::{
@@ -907,10 +907,7 @@ impl CompositeSession {
         }
     }
 
-    pub(crate) async fn fetch(
-        &self,
-        request: FetchRequestEntry,
-    ) -> Result<FetchResultEntry, ClientError> {
+    pub(crate) async fn fetch(&self, request: FetchRequest) -> Result<FetchResultSet, ClientError> {
         // TODO: support fetch request group in session level.
         self.try_reconnect().await;
         let session = self
@@ -919,10 +916,8 @@ impl CompositeSession {
             .ok_or(ClientError::ConnectFailure(self.target.clone()))?;
 
         let request = request::Request {
-            timeout: self.config.client_io_timeout(),
-            headers: request::Headers::Fetch {
-                entries: vec![request],
-            },
+            timeout: request.max_wait,
+            headers: request::Headers::Fetch { request },
             body: None,
         };
         let (tx, rx) = oneshot::channel();
@@ -938,18 +933,11 @@ impl CompositeSession {
             return Err(ClientError::ServerInternal);
         }
 
-        if let Some(response::Headers::Fetch { entries }) = response.headers {
-            trace!("Fetch entries {:?}", entries);
-            if entries.len() != 1 {
-                error!("Expect exactly one entry in fetch response");
-                Err(ClientError::ClientInternal)
-            } else {
-                let entry = FetchResultEntry {
-                    status: entries[0].status.clone(),
-                    data: response.payload,
-                };
-                Ok(entry)
-            }
+        if let Some(response::Headers::Fetch { throttle }) = response.headers {
+            Ok(FetchResultSet {
+                throttle,
+                payload: response.payload,
+            })
         } else {
             Err(ClientError::ClientInternal)
         }
@@ -1039,17 +1027,17 @@ impl CompositeSession {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::broadcast;
-
     use super::CompositeSession;
     use crate::lb_policy::LbPolicy;
+    use crate::mocks::run_listener;
     use std::{error::Error, sync::Arc};
+    use tokio::sync::broadcast;
 
     #[test]
     fn test_new() -> Result<(), Box<dyn Error>> {
         let config = Arc::new(config::Configuration::default());
         tokio_uring::start(async {
-            let port = test_util::run_listener().await;
+            let port = run_listener().await;
             let target = format!("{}:{}", "localhost", port);
             let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
             let _session =
@@ -1061,12 +1049,12 @@ mod tests {
 
     #[test]
     fn test_describe_placement_driver_cluster() -> Result<(), Box<dyn Error>> {
-        test_util::try_init_log();
+        crate::log::try_init_log();
         let mut config = config::Configuration::default();
         config.server.server_id = 1;
         let config = Arc::new(config);
         tokio_uring::start(async {
-            let port = test_util::run_listener().await;
+            let port = run_listener().await;
             let target = format!("{}:{}", "localhost", port);
             let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
             let composite_session =

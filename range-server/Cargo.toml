@@ -43,13 +43,13 @@ tokio = { workspace = true }
 tokio-uring = { workspace = true }
 transport = { path = "../components/transport" }
 util = { path = "../components/util" }
+tiered-storage = { path = "../components/tiered-storage" }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"
 
 [dev-dependencies]
 mockall = { workspace = true }
-test-util = { path = "../components/test-util" }
 
 [build-dependencies]
 built = { workspace = true, features = ["git2", "chrono", "semver"] }

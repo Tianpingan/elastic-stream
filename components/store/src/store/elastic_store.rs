@@ -375,20 +375,19 @@ impl AsRawFd for ElasticStore {
 /// Some tests for ElasticStore.
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, path::Path};
-
-    use bytes::{Bytes, BytesMut};
-    use futures::future::join_all;
-    use log::trace;
-    use tokio::sync::oneshot;
-
     use crate::{
         error::{AppendError, FetchError},
         io::task::SingleFetchResult,
+        mocks::run_listener,
         option::{ReadOptions, WriteOptions},
         store::{append_result::AppendResult, fetch_result::FetchResult},
         AppendRecordRequest, ElasticStore, Store,
     };
+    use bytes::{Bytes, BytesMut};
+    use futures::future::join_all;
+    use log::trace;
+    use std::error::Error;
+    use tokio::sync::oneshot;
 
     fn build_store(pd_address: &str, store_path: &str) -> ElasticStore {
         let mut config = config::Configuration::default();
@@ -409,11 +408,8 @@ mod tests {
     /// Test the basic append and fetch operations.
     #[tokio::test]
     async fn test_run_store() -> Result<(), Box<dyn Error>> {
-        let store_dir = test_util::create_random_path()?;
-        let store_path = store_dir.as_path().to_str().unwrap().to_owned();
-
-        let store_path_g = store_path.clone();
-        let _guard = test_util::DirectoryRemovalGuard::new(&Path::new(&store_path_g));
+        let store_dir = tempfile::tempdir()?;
+        let store_path = store_dir.path().to_str().unwrap().to_owned();
 
         let (tx, rx) = oneshot::channel();
 
@@ -422,7 +418,7 @@ mod tests {
 
         let handle = std::thread::spawn(move || {
             tokio_uring::start(async {
-                let port = test_util::run_listener().await;
+                let port = run_listener().await;
                 let _ = port_tx.send(port);
                 let _ = stop_rx.await;
             });

@@ -13,7 +13,7 @@ members = [
     "components/protocol",
     "components/replication",
     "components/store",
-    "components/test-util",
+    "components/tiered-storage",
     "components/tool",
     "components/transport",
     "components/util",
@@ -53,7 +53,7 @@ flatbuffers = { git = "https://github.com/google/flatbuffers.git", tag = "v23.3.
 
 libc = "0.2"
 nix = "0.26"
-moka = { version = "0.11", features = ["future"] }
+opendal = "0.38.0"
 
 # Logging
 log = { version = "0.4", features = [
@@ -100,6 +100,8 @@ serde = "1.0"
 serde_yaml = "0.9"
 
 local-sync = "0.1"
+
+tempfile = "3"
 
 [profile.dev]
 panic = "unwind"

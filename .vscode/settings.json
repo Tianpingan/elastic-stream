@@ -25,6 +25,7 @@
         "memtable",
         "minstant",
         "mkdirs",
+        "mockall",
         "monoio",
         "MPMC",
         "NODROP",
@@ -49,7 +50,6 @@
     "files.insertFinalNewline": true,
     "files.trimFinalNewlines": true,
     "files.trimTrailingWhitespace": true,
-    "editor.renderWhitespace": "trailing",
     "editor.formatOnSave": true,
     "[rust]": {
         "editor.defaultFormatter": "rust-lang.rust-analyzer"
