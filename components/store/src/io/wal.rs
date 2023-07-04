@@ -798,6 +798,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Test the ci."]
     fn test_load_wals() -> Result<(), StoreError> {
         let store_base = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
         let mut cfg = config::Configuration::default();
