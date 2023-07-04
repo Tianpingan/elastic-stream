@@ -309,7 +309,7 @@ impl Default for Store {
             pre_allocate_segment_file_number: 2,
             uring: Uring::default(),
             rocksdb: RocksDB::default(),
-            total_segment_file_size: 20971520,
+            total_segment_file_size: 52428800,
             reclaim_policy: ReclaimSegmentFilePolicy::default(),
             io_cpu: 0,
         }
