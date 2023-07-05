@@ -811,6 +811,62 @@ mod tests {
         assert_eq!(segment_sum, wal.segments.len() as u64);
         Ok(())
     }
+    #[test]
+    fn test_expand_wals() -> Result<(), StoreError> {
+        let store_base = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
+        let mut cfg = config::Configuration::default();
+        cfg.store.path.set_base(store_base.path().to_str().unwrap());
+        cfg.check_and_apply()
+            .expect("Failed to check-and-apply configuration");
+        let segment_size = cfg.store.segment_size;
+        let segment_sum = cfg.store.total_segment_file_size / cfg.store.segment_size;
+        let config = Arc::new(cfg);
+        let files: Vec<_> = (0..10)
+            .into_iter()
+            .map(|i| {
+                let f = config
+                    .store
+                    .path
+                    .wal_path()
+                    .join(LogSegment::format(i * segment_size));
+                File::create(f.as_path())
+            })
+            .try_collect()?;
+        assert_eq!(10, files.len());
+        // Prepare log segment files
+        let mut wal = create_wal(&config)?;
+        wal.load_from_paths()?;
+        assert_eq!(segment_sum, wal.segments.len() as u64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_shrink_wals() -> Result<(), StoreError> {
+        let store_base = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
+        let mut cfg = config::Configuration::default();
+        cfg.store.path.set_base(store_base.path().to_str().unwrap());
+        cfg.check_and_apply()
+            .expect("Failed to check-and-apply configuration");
+        let segment_size = cfg.store.segment_size;
+        let config = Arc::new(cfg);
+        let files: Vec<_> = (0..200)
+            .into_iter()
+            .map(|i| {
+                let f = config
+                    .store
+                    .path
+                    .wal_path()
+                    .join(LogSegment::format(i * segment_size));
+                File::create(f.as_path())
+            })
+            .try_collect()?;
+        assert_eq!(200, files.len());
+        // Prepare log segment files
+        let mut wal = create_wal(&config)?;
+        wal.load_from_paths()?;
+        assert_eq!(200, wal.segments.len() as u64);
+        Ok(())
+    }
 
     #[test]
     fn test_alloc_segment() -> Result<(), StoreError> {
