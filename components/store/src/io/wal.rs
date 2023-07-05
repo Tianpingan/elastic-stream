@@ -798,31 +798,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Test the ci."]
     fn test_load_wals() -> Result<(), StoreError> {
         let store_base = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
         let mut cfg = config::Configuration::default();
         cfg.store.path.set_base(store_base.path().to_str().unwrap());
         cfg.check_and_apply()
             .expect("Failed to check-and-apply configuration");
+        let segment_sum = cfg.store.total_segment_file_size / cfg.store.segment_size;
         let config = Arc::new(cfg);
-        // Prepare log segment files
-        let files: Vec<_> = (0..10)
-            .into_iter()
-            .map(|i| {
-                let f = config
-                    .store
-                    .path
-                    .wal_path()
-                    .join(LogSegment::format(i * 100));
-                File::create(f.as_path())
-            })
-            .try_collect()?;
-        assert_eq!(10, files.len());
-
         let mut wal = create_wal(&config)?;
         wal.load_from_paths()?;
-        assert_eq!(files.len(), wal.segments.len());
+        assert_eq!(segment_sum, wal.segments.len() as u64);
         Ok(())
     }
 
