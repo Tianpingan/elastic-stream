@@ -249,7 +249,7 @@ impl Wal {
                 Ok((Some(entry), len)) => {
                     let stream_id = entry.stream_id as i64;
                     let range = entry.index;
-                    let offset = entry.offset;
+                    let offset = entry.offset.expect("base-offset should have been assigned");
                     let handle = RecordHandle {
                         wal_offset: segment.wal_offset + file_pos - len as u64 - 8,
                         len: len as u32 + 8,
@@ -350,7 +350,7 @@ impl Wal {
             self.inflight_control_tasks.insert(offset, status);
             let sqe = opcode::OpenAt::new(types::Fd(libc::AT_FDCWD), segment.path.as_ptr())
                 .flags(libc::O_CREAT | libc::O_RDWR | libc::O_DIRECT)
-                .mode(libc::S_IRWXU | libc::S_IRWXG)
+                .mode(libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IWGRP)
                 .build()
                 .user_data(offset);
             unsafe {
@@ -748,7 +748,7 @@ impl Wal {
                     segment.status = Status::OpenAt;
                     let sqe = opcode::OpenAt::new(types::Fd(libc::AT_FDCWD), segment.path.as_ptr())
                         .flags(libc::O_CREAT | libc::O_RDWR | libc::O_DIRECT)
-                        .mode(libc::S_IRWXU | libc::S_IRWXG)
+                        .mode(libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IWGRP)
                         .build()
                         .user_data(offset);
                     unsafe {

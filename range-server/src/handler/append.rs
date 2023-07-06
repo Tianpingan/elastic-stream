@@ -10,7 +10,7 @@ use protocol::rpc::header::{AppendResponseArgs, AppendResultEntryArgs, ErrorCode
 use std::{cell::UnsafeCell, fmt, rc::Rc};
 use store::{error::AppendError, option::WriteOptions, AppendRecordRequest, AppendResult, Store};
 
-use crate::{error::ServiceError, stream_manager::StreamManager};
+use crate::{error::ServiceError, range_manager::RangeManager};
 
 use super::util::{finish_response_builder, system_error_frame_bytes, MIN_BUFFER_SIZE};
 
@@ -47,6 +47,16 @@ impl Append {
         })
     }
 
+    fn replicated(&self) -> Result<bool, ErrorCode> {
+        if let (Some(entry), _) =
+            Payload::parse_append_entry(&self.payload).map_err(|_| ErrorCode::BAD_REQUEST)?
+        {
+            Ok(entry.offset.is_some())
+        } else {
+            unreachable!("Append request should at least contain one append-entry")
+        }
+    }
+
     /// Process message publish request
     ///
     /// On receiving a message publish request, it wraps the incoming request to a `Record`.
@@ -61,12 +71,28 @@ impl Append {
     pub(crate) async fn apply<S, M>(
         &self,
         store: Rc<S>,
-        stream_manager: Rc<UnsafeCell<M>>,
+        range_manager: Rc<UnsafeCell<M>>,
         response: &mut Frame,
     ) where
         S: Store,
-        M: StreamManager,
+        M: RangeManager,
     {
+        match self.replicated() {
+            Ok(replicated) => {
+                if !replicated {
+                    // TODO: replicate records for multi-writers
+                    return;
+                }
+            }
+
+            Err(e) => {
+                error!("Failed to parse append request payload: {:?}", e);
+                response.flag_system_err();
+                response.header = Some(system_error_frame_bytes(e, "Bad Request"));
+                return;
+            }
+        }
+
         let to_store_requests = match self.build_store_requests() {
             Ok(requests) => requests,
             Err(err_code) => {
@@ -83,7 +109,7 @@ impl Append {
             .map(|req| {
                 trace!("{}", req);
                 let result = async {
-                    if let Some(range) = unsafe { &mut *stream_manager.get() }
+                    if let Some(range) = unsafe { &mut *range_manager.get() }
                         .get_range(req.stream_id, req.range_index)
                     {
                         if let Some(window) = range.window_mut() {
@@ -126,7 +152,7 @@ impl Append {
             .map(|res| {
                 match res {
                     Ok(result) => {
-                        if let Err(e) = unsafe { &mut *stream_manager.get() }.commit(
+                        if let Err(e) = unsafe { &mut *range_manager.get() }.commit(
                             result.stream_id,
                             result.range_index as i32,
                             result.offset as u64,
@@ -202,7 +228,7 @@ impl Append {
             let request = AppendRecordRequest {
                 stream_id: entry.stream_id as i64,
                 range_index: entry.index as i32,
-                offset: entry.offset as i64,
+                offset: entry.offset.map(|value| value as i64).unwrap_or(-1),
                 len: entry.len,
                 buffer: self.payload.slice(pos..pos + len),
             };
@@ -267,10 +293,11 @@ impl fmt::Display for Append {
             ),
             Ok(entries) => entries.iter().fold(Ok(()), |result, entry| {
                 result.and_then(|_| {
+                    let offset = entry.offset.map(|value| value as i64).unwrap_or(-1);
                     write!(
                         f,
                         "AppendEntry: stream-id={}, range-index={}, offset={}, len={}",
-                        entry.stream_id, entry.index, entry.offset, entry.len
+                        entry.stream_id, entry.index, offset, entry.len
                     )
                 })
             }),

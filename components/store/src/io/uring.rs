@@ -8,6 +8,7 @@ use crate::io::task::WriteTask;
 use crate::io::wal::Wal;
 use crate::io::write_window::WriteWindow;
 use crate::AppendResult;
+use io_uring::types::{SubmitArgs, Timespec};
 use minstant::Instant;
 use observation::metrics::uring_metrics::{
     UringStatistics, COMPLETED_READ_IO, COMPLETED_WRITE_IO, INFLIGHT_IO, IO_DEPTH, PENDING_TASK,
@@ -175,12 +176,18 @@ impl IO {
             StoreError::IoUring
         })?;
 
-        let data_ring = io_uring::IoUring::builder()
-            .dontfork()
-            .setup_iopoll()
-            .setup_sqpoll(config.store.uring.sqpoll_idle_ms)
-            .setup_sqpoll_cpu(config.store.uring.sqpoll_cpu)
-            .setup_r_disabled()
+        let mut binding = io_uring::IoUring::builder();
+        let data_ring_builder = binding.dontfork().setup_r_disabled();
+
+        // If polling is enabled, setup the iopoll and sqpoll flags
+        if config.store.uring.polling {
+            data_ring_builder
+                .setup_iopoll()
+                .setup_sqpoll(config.store.uring.sqpoll_idle_ms)
+                .setup_sqpoll_cpu(config.store.uring.sqpoll_cpu);
+        }
+
+        let data_ring = data_ring_builder
             .build(config.store.uring.queue_depth)
             .map_err(|e| {
                 error!("Failed to build polling I/O Uring instance: {:?}", e);
@@ -878,13 +885,25 @@ impl IO {
             return;
         }
 
+        // For polling mode, there are two rules to set the `wanted` value:
+        //   1. default to zero, which means that io_uring_enter only submits the SQEs without waiting for completion.
+        //   2. if the inflight tasks are more than the queue depth, set the `wanted` to 1.
+        // For interrupt mode, the `wanted` is always one, to reduce the CPU usage of our uring driver thread.
         let mut wanted = 0;
-        if self.inflight as u32 >= self.options.store.uring.queue_depth {
+        if !self.options.store.uring.polling
+            || self.inflight as u32 >= self.options.store.uring.queue_depth
+        {
             wanted = 1;
         }
 
+        // Build the submit args, which contains the timeout value to avoid blocking by io_uring_enter.
+        let args = SubmitArgs::new();
+        let ts = Timespec::new();
+        ts.nsec(self.options.store.uring.enter_timeout_ns);
+        args.timespec(&ts);
+
         loop {
-            match self.data_ring.submit_and_wait(wanted) {
+            match self.data_ring.submitter().submit_with_args(wanted, &args) {
                 Ok(_submitted) => {
                     break;
                 }
@@ -900,13 +919,19 @@ impl IO {
                             // application may want to handle the signal before we can wait again.
                             // We can't go to sleep with a pending signal.
                             warn!("io_uring_enter got an error: {:?}", e);
+
+                            // Continue to retry.
                             continue;
+                        }
+                        io::ErrorKind::TimedOut => {
+                            // io_uring_enter timed out, IO hang detected, just break the loop and focus on the other tasks.
+                            break;
                         }
                         io::ErrorKind::WouldBlock => {
                             // The kernel was unable to allocate memory for the request, or otherwise ran out of resources to handle it.
                             // The application should wait for some completions and try again.
                             warn!("io_uring_enter got an error: {:?}", e);
-                            continue;
+                            break;
                         }
                         io::ErrorKind::ResourceBusy => {
                             // If the IORING_FEAT_NODROP feature flag is set, then EBUSY will be returned if there were overflow entries,
@@ -916,6 +941,10 @@ impl IO {
                             // requests than we have room for in the CQ ring, or if the application attempts to wait for more events without
                             // having reaped the ones already present in the CQ ring.
                             warn!("io_uring_enter got an error: {:?}", e);
+
+                            // For EBUSY, we should break the loop and the subsequent `reap_data_tasks` will try clean the completion queue.
+                            // After that, we will get a new chance to submit the SQEs.
+                            break;
                         }
                         _ => {
                             // Fatal errors, crash the process and let watchdog to restart.
@@ -1001,93 +1030,99 @@ impl IO {
                         match e {
                             StoreError::System(errno) => {
                                 error!(
-                                    "io_uring opcode `{}` failed. errno: `{}`",
+                                    "Failed to complete IO task, opcode: {}, errno: {}",
                                     context.opcode, errno
                                 );
 
                                 let error = io::Error::from_raw_os_error(errno);
-                                // Some errors are not fatal, we should retry the task.
-                                // TODO: Add more error kinds to retry.
-                                if error.kind() == io::ErrorKind::Interrupted
-                                    || error.kind() == io::ErrorKind::WouldBlock
-                                {
-                                    if self.blocked.contains_key(&context.wal_offset) {
-                                        // There is a pending write task for this block, skip this task.
-                                        trace!(
-                                            "Skip retrying the failed write task for wal offset {} as there is a pending write task for this block",
-                                            context.wal_offset
-                                        );
+                                match error.kind() {
+                                    // Some errors are not fatal, we should retry the task.
+                                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock => {
+                                        if self.blocked.contains_key(&context.wal_offset) {
+                                            // There is a pending write task for this block, skip this task.
+                                            trace!(
+                                                "Skip retrying the failed write task for wal offset {} as there is a pending write task for this block",
+                                                context.wal_offset
+                                            );
+                                            continue;
+                                        }
+
+                                        let wal_offset = context.wal_offset;
+                                        let buf = context.buf.clone();
+
+                                        if buf.partial() {
+                                            // Partial write, set the barrier.
+                                            self.barrier.borrow_mut().insert(buf.wal_offset);
+                                            trace!(
+                                                "Insert a barrier with wal_offset={}",
+                                                buf.wal_offset
+                                            );
+                                        }
+
+                                        let sg = match self.wal.segment_file_of(wal_offset) {
+                                            Some(sg) => sg,
+                                            None => {
+                                                error!(
+                                                    "Log segment not found for wal offset {}",
+                                                    wal_offset
+                                                );
+                                                continue;
+                                            }
+                                        };
+
+                                        let sd = match &sg.sd {
+                                            Some(sd) => sd,
+                                            None => {
+                                                error!(
+                                                    "Log segment {} does not have a valid descriptor",
+                                                    sg.wal_offset
+                                                );
+                                                continue;
+                                            }
+                                        };
+
+                                        let file_offset = wal_offset - sg.wal_offset;
+                                        let buf_ptr = buf.as_ptr() as *mut u8;
+
+                                        match context.opcode {
+                                            opcode::Read::CODE => {
+                                                let sqe = opcode::Read::new(
+                                                    types::Fd(sd.fd),
+                                                    buf_ptr,
+                                                    context.len,
+                                                )
+                                                .offset(file_offset as libc::off_t)
+                                                .build()
+                                                .user_data(Box::into_raw(context) as u64);
+
+                                                self.resubmit_sqes.push_back(sqe);
+                                            }
+                                            opcode::Write::CODE => {
+                                                let sqe = opcode::Write::new(
+                                                    types::Fd(sd.fd),
+                                                    buf_ptr,
+                                                    buf.capacity as u32,
+                                                )
+                                                .offset64(file_offset as libc::off_t)
+                                                .build()
+                                                .user_data(Box::into_raw(context) as u64);
+
+                                                self.resubmit_sqes.push_back(sqe);
+                                            }
+                                            _ => (),
+                                        };
+
                                         continue;
                                     }
-
-                                    let wal_offset = context.wal_offset;
-                                    let buf = context.buf.clone();
-
-                                    if buf.partial() {
-                                        // Partial write, set the barrier.
-                                        self.barrier.borrow_mut().insert(buf.wal_offset);
-                                        trace!(
-                                            "Insert a barrier with wal_offset={}",
-                                            buf.wal_offset
+                                    _ => {
+                                        // More CQE errors please refer to: https://manpages.debian.org/unstable/liburing-dev/io_uring_enter.2.en.html#CQE_ERRORS
+                                        // Fatal errors, crash the process and let the supervisor restart it.
+                                        panic!(
+                                            "Panic due to fatal IO error, opcode: {}, errno: {}",
+                                            context.opcode, errno
                                         );
                                     }
-
-                                    let sg = match self.wal.segment_file_of(wal_offset) {
-                                        Some(sg) => sg,
-                                        None => {
-                                            error!(
-                                                "Log segment not found for wal offset {}",
-                                                wal_offset
-                                            );
-                                            continue;
-                                        }
-                                    };
-
-                                    let sd = match &sg.sd {
-                                        Some(sd) => sd,
-                                        None => {
-                                            error!(
-                                                "Log segment {} does not have a valid descriptor",
-                                                sg.wal_offset
-                                            );
-                                            continue;
-                                        }
-                                    };
-
-                                    let file_offset = wal_offset - sg.wal_offset;
-                                    let buf_ptr = buf.as_ptr() as *mut u8;
-
-                                    match context.opcode {
-                                        opcode::Read::CODE => {
-                                            let sqe = opcode::Read::new(
-                                                types::Fd(sd.fd),
-                                                buf_ptr,
-                                                context.len,
-                                            )
-                                            .offset(file_offset as libc::off_t)
-                                            .build()
-                                            .user_data(Box::into_raw(context) as u64);
-
-                                            self.resubmit_sqes.push_back(sqe);
-                                        }
-                                        opcode::Write::CODE => {
-                                            let sqe = opcode::Write::new(
-                                                types::Fd(sd.fd),
-                                                buf_ptr,
-                                                buf.capacity as u32,
-                                            )
-                                            .offset64(file_offset as libc::off_t)
-                                            .build()
-                                            .user_data(Box::into_raw(context) as u64);
-
-                                            self.resubmit_sqes.push_back(sqe);
-                                        }
-                                        _ => (),
-                                    };
-
-                                    continue;
                                 }
-                                // TODO: handle the error that can't be recovered.
                             }
 
                             StoreError::WriteWindow => {
