@@ -1,6 +1,9 @@
 [package]
 name = "range-server"
-version = "0.1.0"
+version = { workspace = true }
+authors = { workspace = true }
+description = { workspace = true }
+license = { workspace = true }
 edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -29,6 +32,7 @@ minstant = { workspace = true }
 model = { path = "../components/model" }
 num_cpus = { workspace = true }
 num_enum = { workspace = true }
+object-storage = { path = "../components/object-storage" }
 observation = { path = "../components/observation" }
 polling = { path = "../components/polling" }
 pprof = { workspace = true }
@@ -39,7 +43,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_yaml = { workspace = true }
 store = { path = "../components/store" }
 thiserror = { workspace = true }
-tiered-storage = { path = "../components/tiered-storage" }
 tokio = { workspace = true }
 tokio-uring = { workspace = true }
 transport = { path = "../components/transport" }

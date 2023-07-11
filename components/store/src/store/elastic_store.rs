@@ -11,6 +11,8 @@ use crate::{
     index::{driver::IndexDriver, MinOffset},
     io::{
         self,
+        record::RecordType,
+        segment::LogSegment,
         task::{
             IoTask::{self, Read, Write},
             WriteTask,
@@ -21,6 +23,7 @@ use crate::{
     option::{ReadOptions, WriteOptions},
     AppendRecordRequest, AppendResult, FetchResult, Store,
 };
+use bytes::Buf;
 use client::PlacementDriverIdGenerator;
 use crossbeam::channel::Sender;
 use futures::future::join_all;
@@ -244,7 +247,46 @@ impl Store for ElasticStore {
             let flattened_result: Vec<_> = io_result
                 .into_iter()
                 .map(|res| match res {
-                    Ok(Ok(res)) => Ok(res),
+                    Ok(Ok(mut res)) => {
+                        // Strip storage record header
+                        let mut record_prefix = util::bytes::advance_bytes(
+                            &mut res.payload,
+                            crate::RECORD_PREFIX_LENGTH as usize,
+                        );
+
+                        // Verify data integrity
+                        if record_prefix.len() != crate::RECORD_PREFIX_LENGTH as usize {
+                            error!("Data corrupted: Record does not even have a prefix");
+                            return Err(FetchError::DataCorrupted);
+                        }
+                        let expected_crc32 = record_prefix.get_u32();
+
+                        let length_type = record_prefix.get_u32();
+                        let _type = length_type & 0xFF;
+                        debug_assert_eq!(_type as u8, RecordType::Full.into());
+                        let expected_length = length_type >> 8;
+                        let actual_length = res.payload.iter().map(|buf| buf.len()).sum::<usize>();
+                        if expected_length != actual_length as u32 {
+                            error!(
+                                "Data corrupted: Record length mismatch. Expected: {}, Actual: {}",
+                                expected_length, actual_length
+                            );
+                            return Err(FetchError::DataCorrupted);
+                        }
+
+                        let segment_size = self.config.store.segment_size;
+                        let base_file_offset = res.wal_offset as u64 / segment_size * segment_size;
+                        let actual_crc =
+                            LogSegment::checksum_record(&res.payload, base_file_offset);
+                        if actual_crc != expected_crc32 {
+                            error!(
+                                "Data corrupted: CRC32 checksum failed. Expected: {}, Actual: {}",
+                                expected_crc32, actual_crc
+                            );
+                            return Err(FetchError::DataCorrupted);
+                        }
+                        Ok(res)
+                    }
                     Ok(Err(e)) => Err(e),
                     Err(_) => Err(FetchError::ChannelRecv), // Channel receive error branch
                 })
@@ -408,6 +450,7 @@ mod tests {
     /// Test the basic append and fetch operations.
     #[tokio::test]
     async fn test_run_store() -> Result<(), Box<dyn Error>> {
+        crate::log::try_init_log();
         let store_dir = tempfile::tempdir()?;
         let store_path = store_dir.path().to_str().unwrap().to_owned();
 
@@ -455,7 +498,7 @@ mod tests {
 
         // Case One: Fetch all records one by one.
         {
-            let mut fetch_fs = vec![];
+            let mut fetch_futures = vec![];
             append_rs.iter().for_each(|res| {
                 // Log the append result
                 match res {
@@ -464,13 +507,13 @@ mod tests {
                         let options = ReadOptions {
                             stream_id: 1,
                             range: 0,
-                            offset: 0,
+                            offset: res.offset,
                             max_offset: 1024,
                             max_bytes: 1,
                             max_wait_ms: 1000,
                         };
-                        let fetch_f = store.fetch(options);
-                        fetch_fs.push(fetch_f);
+                        let fetch_future = store.fetch(options);
+                        fetch_futures.push(fetch_future);
                     }
                     Err(e) => {
                         panic!("Append error: {:?}", e);
@@ -478,16 +521,17 @@ mod tests {
                 }
             });
 
-            let fetch_rs: Vec<Result<FetchResult, FetchError>> = join_all(fetch_fs).await;
+            let fetch_rs: Vec<Result<FetchResult, FetchError>> = join_all(fetch_futures).await;
             assert!(fetch_rs.len() == append_rs.len());
-            fetch_rs.iter().flatten().for_each(|res| {
+            fetch_rs.iter().for_each(|res| {
+                let res = res.as_ref().expect("Fetch should not fail");
                 let mut res_payload = BytesMut::new();
                 res.results.iter().for_each(|r| {
                     res_payload.extend_from_slice(&copy_single_fetch_result(r));
                 });
 
                 assert_eq!(
-                    Bytes::copy_from_slice(&res_payload[(crate::RECORD_PREFIX_LENGTH as usize)..]),
+                    Bytes::copy_from_slice(&res_payload[..]),
                     Bytes::from(format!("{}-{}", "hello, world", res.offset))
                 );
             });
@@ -495,7 +539,7 @@ mod tests {
 
         // Case Two: Fetch all records through a single call
         {
-            let mut fetch_fs = vec![];
+            let mut fetch_futures = vec![];
             let options = ReadOptions {
                 stream_id: 1,
                 range: 0,
@@ -504,16 +548,16 @@ mod tests {
                 max_bytes: 1024 * 1024 * 1024,
                 max_wait_ms: 1000,
             };
-            let fetch_f = store.fetch(options);
-            fetch_fs.push(fetch_f);
-            let fetch_rs: Vec<Result<FetchResult, FetchError>> = join_all(fetch_fs).await;
-            assert_eq!(1, fetch_rs.len());
-            let fetch_res = fetch_rs[0].as_ref().unwrap();
-            fetch_res.results.iter().enumerate().for_each(|(i, r)| {
+            let fetch_future = store.fetch(options);
+            fetch_futures.push(fetch_future);
+            let fetch_results: Vec<Result<FetchResult, FetchError>> = join_all(fetch_futures).await;
+            assert_eq!(1, fetch_results.len());
+            let fetch_result = fetch_results[0].as_ref().unwrap();
+            fetch_result.results.iter().enumerate().for_each(|(i, r)| {
                 let mut res_payload = BytesMut::new();
                 res_payload.extend_from_slice(&copy_single_fetch_result(r));
                 assert_eq!(
-                    Bytes::copy_from_slice(&res_payload[(crate::RECORD_PREFIX_LENGTH as usize)..]),
+                    Bytes::copy_from_slice(&res_payload[..]),
                     Bytes::from(format!("{}-{}", "hello, world", i))
                 );
             });

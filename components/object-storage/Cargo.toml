@@ -1,11 +1,15 @@
 [package]
-name = "tiered-storage"
-version = "0.1.0"
+name = "object-storage"
+version = { workspace = true }
+authors = { workspace = true }
+description = { workspace = true }
+license = { workspace = true }
 edition = "2021"
 
 [dependencies]
 bytes = { workspace = true }
 clap = { workspace = true }
+config = { path = "../config" }
 env_logger = { workspace = true }
 flatbuffers = { workspace = true }
 log = { workspace = true }

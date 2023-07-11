@@ -5,8 +5,8 @@ use flatbuffers::FlatBufferBuilder;
 use log::{trace, warn};
 use minstant::Instant;
 use protocol::rpc::header::{
-    ErrorCode, FetchRequest, FetchResponse, FetchResponseArgs, FetchResponseT, Status, StatusArgs,
-    StatusT,
+    ErrorCode, FetchRequest, FetchResponse, FetchResponseArgs, FetchResponseT, ObjectMetadataT,
+    Status, StatusArgs, StatusT,
 };
 use std::{cell::UnsafeCell, fmt, rc::Rc};
 use store::{error::FetchError, option::ReadOptions, Store};
@@ -63,6 +63,11 @@ impl<'a> Fetch<'a> {
                 return;
             }
         };
+        let stream_id = option.stream_id as u64;
+        let range_index = option.range;
+        let start_offset = option.offset as u64;
+        let end_offset = option.max_offset;
+        let size_hint = option.max_bytes as u32;
 
         // TODO: handle store timeout
         let start = Instant::now();
@@ -78,10 +83,19 @@ impl<'a> Fetch<'a> {
                 };
                 let status = Status::create(&mut builder, &status_args);
 
+                let objects = unsafe { &*range_manager.get() }
+                    .get_objects(stream_id, range_index, start_offset, end_offset, size_hint)
+                    .await;
+                let objects = objects
+                    .into_iter()
+                    .map(|o| Into::<ObjectMetadataT>::into(o).pack(&mut builder))
+                    .collect::<Vec<_>>();
+                let objects = builder.create_vector(&objects);
+
                 let fetch_response_args = FetchResponseArgs {
                     status: Some(status),
                     throttle_time_ms: -1,
-                    object_metadata_list: None,
+                    object_metadata_list: Some(objects),
                 };
                 let fetch_response = FetchResponse::create(&mut builder, &fetch_response_args);
                 builder.finish(fetch_response, None);
@@ -148,6 +162,7 @@ impl<'a> Fetch<'a> {
             FetchError::NoRecord => ErrorCode::NO_NEW_RECORD,
             FetchError::RangeNotFound => ErrorCode::RANGE_NOT_FOUND,
             FetchError::BadRequest => ErrorCode::BAD_REQUEST,
+            FetchError::DataCorrupted => ErrorCode::RS_DATA_CORRUPTED,
         };
         status.message = Some(err.to_string());
     }
@@ -165,14 +180,15 @@ mod tests {
     use crate::range_manager::{
         fetcher::MockPlacementFetcher, manager::DefaultRangeManager, RangeManager,
     };
-    use codec::frame::{Frame, OperationCode};
+    use codec::frame::Frame;
     use model::stream::StreamMetadata;
-    use protocol::rpc::header::{ErrorCode, FetchRequestT, FetchResponse, RangeT};
+    use object_storage::MockObjectStorage;
+    use protocol::rpc::header::{ErrorCode, FetchRequestT, FetchResponse, OperationCode, RangeT};
     use std::{cell::UnsafeCell, error::Error, rc::Rc, sync::Arc};
     use store::error::FetchError;
 
     fn build_fetch_request() -> Frame {
-        let mut request = Frame::new(OperationCode::Fetch);
+        let mut request = Frame::new(OperationCode::FETCH);
         let mut builder = flatbuffers::FlatBufferBuilder::new();
         let mut fetch_request = FetchRequestT::default();
         let mut range = RangeT::default();
@@ -220,19 +236,24 @@ mod tests {
                 retention_period: std::time::Duration::from_secs(1),
             })
         });
+        let mut object_storage = MockObjectStorage::new();
+        object_storage
+            .expect_get_objects()
+            .returning(|_, _, _, _, _| vec![]);
 
         tokio_uring::start(async move {
             let store = Rc::new(mock_store);
             let range_manager = Rc::new(UnsafeCell::new(DefaultRangeManager::new(
                 mock_fetcher,
                 Rc::clone(&store),
+                Rc::new(object_storage),
             )));
 
             let sm = unsafe { &mut *range_manager.get() };
             sm.start().await.unwrap();
 
             let request = build_fetch_request();
-            let mut response = Frame::new(OperationCode::Fetch);
+            let mut response = Frame::new(OperationCode::FETCH);
             let handler =
                 super::Fetch::parse_frame(&request).expect("Failed to parse request frame");
             handler
