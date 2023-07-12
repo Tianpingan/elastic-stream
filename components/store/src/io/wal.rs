@@ -357,9 +357,9 @@ impl Wal {
             self.segments.push_back(segment);
             Ok(())
         } else {
-            Err(StoreError::DiskFull(
-                "The total size of the segment file has reached the limit.".to_string(),
-            ))
+            Err(StoreError::DiskFull(String::from(
+                self.config.store.path.wal_path().to_string_lossy(),
+            )))
         }
     }
     /// Determine if there is sufficient space available to allocate a new segment file.
