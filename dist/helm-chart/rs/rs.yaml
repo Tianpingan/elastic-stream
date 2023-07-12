@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rs
+  namespace: range-server
+  labels:
+    app: range-server
+spec:
+  selector:
+    matchLabels:
+      app: range-server
+  serviceName: "rs"
+  replicas: 3
+  template:
+    metadata:
+      name: range-server
+      labels:
+        app: range-server
+    spec:
+      securityContext:
+        fsGroup: 65535
+      containers:
+        - name: range-server
+          image: TODO
+          imagePullPolicy: "Always"
+          ports:
+            - containerPort: 12379
+              name: client
+            - containerPort: 12380
+              name: peer
+          volumeMounts:
+            - name: rs-data
+              mountPath: /data/range-server
+
+  volumeClaimTemplates:
+    - metadata:
+        name: rs-data
+      spec:
+        storageClassName: gp2
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 120Gi

@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name:  {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app:  {{ .Release.Name }}
+spec:
+  selector:
+    matchLabels:
+      app:  {{ .Release.Name }}
+  serviceName: {{ .Release.Name }}-svc
+  replicas: {{ .Values.replicas }}
+  template:
+    metadata:
+      name:  {{ .Release.Name }}
+      labels:
+        app:  {{ .Release.Name }}
+    spec:
+      securityContext:
+        fsGroup: 65535
+      containers:
+        - name:  {{ .Release.Name }}
+          image: {{ .Values.image }}:{{ .Values.imageTag }}
+          imagePullPolicy: "Always"
+          ports:
+            - containerPort: 12379
+              name: client
+            - containerPort: 12380
+              name: peer
+          volumeMounts:
+            - name: rs-data
+              mountPath: /data/range-server
+
+  volumeClaimTemplates:
+    - metadata:
+        name: {{ .Release.Name }}
+      spec:
+        storageClassName: gp2
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 120Gi
