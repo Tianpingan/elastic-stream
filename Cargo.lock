@@ -2989,6 +2989,7 @@ dependencies = [
  "futures",
  "io-uring",
  "lazy_static",
+ "local-sync",
  "log",
  "log4rs",
  "minstant",
@@ -4188,6 +4189,7 @@ dependencies = [
  "local-sync",
  "log",
  "protocol",
+ "thiserror",
  "tokio",
  "tokio-uring",
 ]
