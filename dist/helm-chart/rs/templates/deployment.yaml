@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: { { .Values.range-server.name } }
+  labels: { { .Values.range-server.name } }
+spec:
+  replicas: { { .Values.range-server.count } }
+  selector:
+    matchLabels:
+      apps: { { .Values.range-server.name } }
+  template:
+    metadata:
+      labels:
+        app: { { .Values.range-server.name } }
+    spec:
+      containers:
+        - name: { { .Values.range-server.name } }
+          image: { { .Values.range-server.name } }
+          command:
+            [
+              "/usr/local/bin/range-server",
+              "-c",
+              "/etc/range-server/range-server.yaml",
+              "-l",
+              "/etc/range-server/range-server-log.yaml",
+            ]
+          imagePullPolicy: { { .Values.image.pullPolicy } }
+          volumeMounts:
+            - name: range-server-config
+              mountPath: "/etc/range-server/range-server.yaml"
+            - name: range-server-log-config
+              mountPath: "/etc/range-server/range-server-log.yaml"
+      volumes:
+        - name: range-server-config
+          configMap:
+            name: { { .Values.range-server.name } }-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.range-server.server.name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: { { .Values.range-server.name } }
+  ports:
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .targetPort }}

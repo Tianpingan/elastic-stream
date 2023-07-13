@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ .Release.Name }}-client
 spec:
   type: LoadBalancer
   ports:
@@ -15,7 +15,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ .Release.Name }}-srv
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Release.Name }}
@@ -28,4 +28,36 @@ spec:
       name: peer
   selector:
     app: {{ .Release.Name }}
----
+# ---
+
+
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: pd-client
+# spec:
+#   type: LoadBalancer
+#   ports:
+#     - name: pd-client
+#       port: 12379
+#       protocol: TCP
+#       targetPort: 12379
+#   selector:
+#     app: placement-driver
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: pd
+#   namespace: placement-driver
+#   labels:
+#     app: placement-driver
+# spec:
+#   clusterIP: None
+#   ports:
+#     - port: 12379
+#       name: client
+#     - port: 12380
+#       name: peer
+#   selector:
+#     app: placement-driver

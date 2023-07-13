@@ -26,11 +26,12 @@ spec:
           ports:
             - containerPort: 12379
               name: client
-            - containerPort: 12380
-              name: peer
           volumeMounts:
             - name: rs-data
               mountPath: /data/range-server
+      volunmes:
+        - name: config-volumn
+          configMap: {{.Release.Name}}-cm
 
   volumeClaimTemplates:
     - metadata:
