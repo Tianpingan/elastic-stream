@@ -24,20 +24,37 @@ spec:
             {{- range .Values.range_server.ports }}
             - name: {{ .name }}
               containerPort: {{.port}}
-            {{- end}}
+            {{- end }}
           volumeMounts:
             - name: rs-data
               mountPath: /data/range-server
-            {{- range .Values.range_server.configmap_volumes }}
-            - name: {{ .name }}
-              mountPath: {{.mountPath}}
-            {{- end }}
+            - name: config-volume
+              mountPath: /etc/range-server
+            # - name: range-server
+            #   mountPath: {{ .Values.range_server.configmap_volumes.range_server.mountPath }}
+            #   subPath: {{ .Values.range_server.configmap_volumes.range_server.subPath }}
+            # - name: range-server-log
+            #   mountPath: {{ .Values.range_server.configmap_volumes.range_server_log.mountPath }}
+            #   subPath: {{ .Values.range_server.configmap_volumes.range_server_log.subPath }}
       volumes:
-        {{- range .Values.range_server.configmap_volumes }}
-        - name: {{ .name }}
-        configMap:
-          name: {{ .name }}
-        {{- end}}
+        - name: config-volume
+          configMap:
+            name: {{ .Values.range_server.name }}-conf
+
+      # volumes:
+      #   - name: range-server
+      #     configMap:
+      #       name: {{ .Values.range_server.name }}-conf
+      #       items:
+      #       - key: {{ .Values.range_server.configmap_volumes.range_server.subPath }}
+      #         path: {{ .Values.range_server.configmap_volumes.range_server.subPath }}
+      #   - name: range-server-log
+      #     configMap:
+      #       name: {{ .Values.range_server.name }}-conf
+      #       items:
+      #       - key: {{ .Values.range_server.configmap_volumes.range_server_log.subPath }}
+      #         path: {{ .Values.range_server.configmap_volumes.range_server_log.subPath }}
+
   volumeClaimTemplates:
     - metadata:
         name: rs-data

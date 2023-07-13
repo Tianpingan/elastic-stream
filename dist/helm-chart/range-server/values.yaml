@@ -11,13 +11,24 @@ range_server:
       port: 10911
     - name: metrics
       port: 9898
-  configmap_volumes:
-    - name: range-server-config
-      mountPath: /etc/range-server/range-server.yaml
-    - name: range-server-log-config
-      mountPath: /etc/range-server/range-server-log.yaml
 
-  range_server_config:
+  configmap_volumes:
+    range_server:
+      mountPath: /etc/range-server/range-server.yaml
+      subPath: range-server.yaml
+    range_server_log:
+      mountPath: /etc/range-server/range-server-log.yaml
+      subPath: range-server-log.yaml
+
+  # configmap_volumes:
+  #   - name: range-server-config
+  #     mountPath: /etc/range-server/range-server.yaml
+  #     subPath: range-server.yaml
+  #   - name: range-server-log-config
+  #     mountPath: /etc/range-server/range-server-log.yaml
+  #     subPath: range-server-log.yaml
+
+  range_server_config: |-
     # Unit of interval in milliseconds
     tick: 100
     # Placement driver address
@@ -123,7 +134,7 @@ range_server:
         # Listening port
         port: 9898
 
-  range_server_log_config:
+  range_server_log_config: |-
     refresh_rate: 30 seconds
 
     appenders:
