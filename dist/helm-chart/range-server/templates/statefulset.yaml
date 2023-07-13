@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.range_server.name }}
+  namespace: {{ .Values.range_server.name }}
+  labels:
+    app: {{ .Values.range_server.name }}
+spec:
+  replicas: {{ .Values.range_server.count }}
+  selector:
+    matchLabels:
+      app: {{ .Values.range_server.name }}
+  template:
+    metadata:
+      name: {{ .Values.range_server.name }}
+      labels:
+        app: {{ .Values.range_server.name }}
+    spec:
+      containers:
+        - name: {{ .Values.range_server.name }}
+          image: {{ printf "%s/%s:%s" .Values.range_server.image.registry .Values.range_server.image.repository .Values.range_server.image.tag}}
+          imagePullPolicy: "Always"
+          ports:
+            {{- range .Values.range_server.ports }}
+            - name: {{ .name }}
+              containerPort: {{.port}}
+            {{- end}}
+          volumeMounts:
+            - name: rs-data
+              mountPath: /data/range-server
+            {{- range .Values.range_server.configmap_volumes }}
+            - name: {{ .name }}
+              mountPath: {{.mountPath}}
+            {{- end }}
+      volumes:
+        {{- range .Values.range_server.configmap_volumes }}
+        - name: {{ .name }}
+        configMap:
+          name: {{ .name }}
+        {{- end}}
+  volumeClaimTemplates:
+    - metadata:
+        name: rs-data
+      spec:
+        storageClassName: "standard"
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.range_server.name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Values.range_server.name }}
+  ports:
+    {{- range .Values.range_server.ports }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .port }}
+    {{- end }}

@@ -58,4 +58,8 @@
     "[toml]": {
         "editor.defaultFormatter": "tamasfe.even-better-toml"
     },
+    "yaml.schemas": {
+        "https://json.schemastore.org/helmfile.json": "file:///home/tpa/tianpingan/elastic-stream/dist/helm-chart/range-server/templates/statefulset.yaml",
+        "https://raw.githubusercontent.com/socialgouv/kontinuous/v1/docs/values.schema.json": "file:///home/tpa/tianpingan/elastic-stream/dist/helm-chart/range-server/values.yaml"
+    },
 }

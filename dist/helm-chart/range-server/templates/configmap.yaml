@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.range_server.name }}-conf
+data:
+  range-server.yaml: |-
+{{ .Values.range_server.range_server_config | indent 4 }}
+  range-server-log.yaml: |-
+{{ .Values.range_server.range_server_log_config | indent 4}}
