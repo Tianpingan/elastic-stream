@@ -2,7 +2,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ .Values.range_server.name }}-conf
-  namespace: {{ .Values.range_server.name }}
+  # namespace: {{ .Values.range_server.name }}
+  namespace: dev
   labels:
     app: {{ .Values.range_server.name }}
 data:

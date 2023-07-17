@@ -2,14 +2,17 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: {{ .Values.range_server.name }}
-  namespace: {{ .Values.range_server.name }}
+  # namespace: {{ .Values.range_server.name }}
+  namespace: dev
   labels:
     app: {{ .Values.range_server.name }}
 spec:
-  replicas: {{ .Values.range_server.count }}
   selector:
     matchLabels:
       app: {{ .Values.range_server.name }}
+  serviceName: {{ .Values.range_server.name }}
+  replicas: {{ .Values.range_server.count }}
+
   template:
     metadata:
       name: {{ .Values.range_server.name }}
@@ -20,27 +23,31 @@ spec:
         - name: {{ .Values.range_server.name }}
           image: {{ printf "%s/%s:%s" .Values.range_server.image.registry .Values.range_server.image.repository .Values.range_server.image.tag}}
           imagePullPolicy: "Always"
+          # command: ["cat", "/etc/range-server/range-server.yaml"]
           ports:
-            {{- range .Values.range_server.ports }}
-            - name: {{ .name }}
-              containerPort: {{.port}}
-            {{- end }}
+            - containerPort: 10911
+              name: server
+            - containerPort: 9898
+              name: metrics
+            # {{- range .Values.range_server.ports }}
+            # - name: {{ .name }}
+            #   containerPort: {{.port}}
+            # {{- end }}
           volumeMounts:
-            - name: rs-data
-              mountPath: /data/range-server
+            # - name: rs-data
+              # mountPath: /data/range-server
             - name: config-volume
               mountPath: /etc/range-server
-            # - name: range-server
-            #   mountPath: {{ .Values.range_server.configmap_volumes.range_server.mountPath }}
-            #   subPath: {{ .Values.range_server.configmap_volumes.range_server.subPath }}
-            # - name: range-server-log
-            #   mountPath: {{ .Values.range_server.configmap_volumes.range_server_log.mountPath }}
-            #   subPath: {{ .Values.range_server.configmap_volumes.range_server_log.subPath }}
+            - name: rs-data
+              mountPath: /data
       volumes:
         - name: config-volume
           configMap:
             name: {{ .Values.range_server.name }}-conf
-
+        # - name: rs-data
+        #   hostPath:
+        #     path: /home/tpa/data2
+        #     type: DirectoryOrCreate
       # volumes:
       #   - name: range-server
       #     configMap:
@@ -63,19 +70,46 @@ spec:
         accessModes: [ "ReadWriteOnce" ]
         resources:
           requests:
-            storage: 1Gi
+            storage: 15Gi
 ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: {{ .Values.range_server.name }}
+#   namespace: dev
+
+# spec:
+#   type: ClusterIP
+#   selector:
+#     app: {{ .Values.range_server.name }}
+#   ports:
+#     {{- range .Values.range_server.ports }}
+#     - name: {{ .name }}
+#       port: {{ .port }}
+#       targetPort: {{ .port }}
+#     {{- end }}
+
+
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ .Values.range_server.name }}
+  namespace: dev
+  labels:
+    app: {{ .Values.range_server.name }}
 spec:
   type: ClusterIP
   selector:
     app: {{ .Values.range_server.name }}
   ports:
-    {{- range .Values.range_server.ports }}
-    - name: {{ .name }}
-      port: {{ .port }}
-      targetPort: {{ .port }}
-    {{- end }}
+    - port: 10911
+      name: server
+    - port: 9898
+      name: metrics
+    # {{- range .Values.range_server.ports }}
+    # - name: {{ .name }}
+    #   port: {{ .port }}
+    #   targetPort: {{ .port }}
+    # {{- end }}
+  selector:
+    app: {{ .Values.range_server.name }}

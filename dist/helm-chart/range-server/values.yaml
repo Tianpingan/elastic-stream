@@ -1,6 +1,6 @@
 range_server:
   name: range-server
-  count: 3
+  count: 1
   image:
     registry: docker.io
     repository: elasticstream/range-server
@@ -32,7 +32,7 @@ range_server:
     # Unit of interval in milliseconds
     tick: 100
     # Placement driver address
-    placement-driver: "127.0.0.1:12378"
+    placement-driver: "pd:12378"
     # Client configuration
     client:
       # Connect timeout duration in ticks
@@ -50,7 +50,7 @@ range_server:
     # Server configuration
     server:
       # Advertise host address
-      host: "127.0.0.1"
+      host: "range-server-0.range-server"
       # Listening port
       port: 10911
       # Number of Thread-per-Core Nodes
@@ -130,7 +130,7 @@ range_server:
     observation:
       metrics:
         # Host address
-        host: "127.0.0.1"
+        host: "0.0.0.0"
         # Listening port
         port: 9898
 

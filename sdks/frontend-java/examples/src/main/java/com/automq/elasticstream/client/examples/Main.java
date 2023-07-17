@@ -17,11 +17,10 @@ import com.automq.elasticstream.client.api.RecordBatchWithContext;
 import com.automq.elasticstream.client.api.Stream;
 import static org.junit.Assert.*;
 
-
 public class Main {
 
     public static void main(String[] args) throws Exception {
-        Client client = Client.builder().endpoint("127.0.0.1:12378").kvEndpoint("127.0.0.1:12379").build();
+        Client client = Client.builder().endpoint("pd:12378").kvEndpoint("pd:12379").build();
         Stream stream = client.streamClient()
                 .createAndOpenStream(CreateStreamOptions.newBuilder().replicaCount(1).build()).get();
         long streamId = stream.streamId();
@@ -41,7 +40,8 @@ public class Main {
                 if (ex == null) {
                     long offset = rst.baseOffset();
                     assertEquals(index * 10, offset);
-                    System.out.println("append "+ index + " callback cost:" + (System.nanoTime() - startNanos) / 1000 + "us");
+                    System.out.println(
+                            "append " + index + " callback cost:" + (System.nanoTime() - startNanos) / 1000 + "us");
                 }
                 latch.countDown();
             });
@@ -60,7 +60,7 @@ public class Main {
             recordBatch.rawPayload().get(rawPayload);
             String payloadStr = new String(rawPayload, StandardCharsets.UTF_8);
             System.out.println("fetch record result offset[" + recordBatch.baseOffset() + ","
-                + recordBatch.lastOffset() + "]" + " payload:" + payloadStr + ".");
+                    + recordBatch.lastOffset() + "]" + " payload:" + payloadStr + ".");
             assertEquals(String.format("hello world %03d", i), payloadStr);
             fetchResult.free();
         }
@@ -79,7 +79,7 @@ public class Main {
                 String payloadStr = new String(rawPayload, StandardCharsets.UTF_8);
                 assertEquals(String.format("hello world %03d", index), payloadStr);
                 System.out.println("fetch record result offset[" + recordBatch.baseOffset() + ","
-                    + recordBatch.lastOffset() + "]" + " payload:" + payloadStr + ".");
+                        + recordBatch.lastOffset() + "]" + " payload:" + payloadStr + ".");
             }
             fetchResult.free();
         }
@@ -102,7 +102,7 @@ public class Main {
 
         System.out.println("Step6: read 20 record batch one by one");
         for (int i = 0; i < 20; i++) {
-            FetchResult fetchResult = stream.fetch(i * 10 , i * 10 + 10, Integer.MAX_VALUE).get();
+            FetchResult fetchResult = stream.fetch(i * 10, i * 10 + 10, Integer.MAX_VALUE).get();
             assertEquals(1, fetchResult.recordBatchList().size());
             RecordBatchWithContext recordBatch = fetchResult.recordBatchList().get(0);
             assertEquals(i * 10, recordBatch.baseOffset());
@@ -112,12 +112,12 @@ public class Main {
             recordBatch.rawPayload().get(rawPayload);
             String payloadStr = new String(rawPayload, StandardCharsets.UTF_8);
             System.out.println("fetch record result offset[" + recordBatch.baseOffset() + ","
-                + recordBatch.lastOffset() + "]" + " payload:" + payloadStr + ".");
+                    + recordBatch.lastOffset() + "]" + " payload:" + payloadStr + ".");
             assertEquals(String.format("hello world %03d", i), payloadStr);
             fetchResult.free();
         }
 
-        while(true) {
+        while (true) {
             TimeUnit.SECONDS.sleep(1);
             System.out.println("Tick");
         }

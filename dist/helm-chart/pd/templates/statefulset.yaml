@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.pd.name }}
+  # namespace: {{ .Values.pd.name }}
+  namespace: dev
+  labels:
+    app: {{ .Values.pd.name }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Values.pd.name }}
+  serviceName: {{ .Values.pd.name }}
+  replicas: 3
+  template:
+    metadata:
+      name: {{ .Values.pd.name }}
+      labels:
+        app: {{ .Values.pd.name }}
+    spec:
+      securityContext:
+        fsGroup: 65535
+      containers:
+        - name: {{ .Values.pd.name }}
+          image: {{ printf "%s/%s:%s" .Values.pd.image.registry .Values.pd.image.repository .Values.pd.image.tag}}
+          imagePullPolicy: "Always"
+          ports:
+            - containerPort: 12378
+              name: sdk
+            - containerPort: 12379
+              name: client
+            - containerPort: 12380
+              name: peer
+          volumeMounts:
+            - name: pd-data
+              mountPath: /data/placement-driver
+          env:
+            - name: NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PD_PEERURLS
+              value: "http://0.0.0.0:12380"
+            - name: PD_CLIENTURLS
+              value: "http://0.0.0.0:12379"
+            - name: PD_ADVERTISEPEERURLS
+              value: "http://$(NAME).pd:12380"
+            - name: PD_ADVERTISECLIENTURLS
+              value: "http://$(NAME).pd:12379"
+            - name: PD_NAME
+              value: "$(NAME)"
+            - name: PD_DATADIR
+              value: "/data/placement-driver/default.$(NAME)"
+            - name: PD_INITIALCLUSTER
+              value: "pd-0=http://pd-0.pd:12380,pd-1=http://pd-1.pd:12380,pd-2=http://pd-2.pd:12380"
+            - name: PD_PDADDR
+              value: "0.0.0.0:12378"
+            - name: PD_ADVERTISEPDADDR
+              value: "$(NAME).pd:12378"
+            - name: PD_ETCD_INITIALCLUSTERTOKEN
+              value: "pd-cluster"
+  volumeClaimTemplates:
+    - metadata:
+        name: pd-data
+      spec:
+        storageClassName:  "standard"
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: {{ .Values.pd.name }}
+# spec:
+#   type: LoadBalancer
+#   ports:
+#     - name: pd-client
+#       port: 12379
+#       protocol: TCP
+#       targetPort: 12379
+#     - name: sdk
+#       port: 12378
+#       protocol: TCP
+#       targetPort:  12378
+#   selector:
+    # app: {{ .Values.pd.name }}
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.pd.name }}
+  # namespace: {{ .Values.pd.name }}
+  namespace: dev
+  labels:
+    app: {{ .Values.pd.name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Values.pd.name }}
+  ports:
+    - port: 12378
+      name: sdk
+    - port: 12379
+      name: client
+    - port: 12380
+      name: peer
+  selector:
+    app: {{ .Values.pd.name }}
