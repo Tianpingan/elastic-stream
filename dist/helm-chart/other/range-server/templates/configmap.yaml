@@ -6,6 +6,6 @@ metadata:
     {{- include "range-server.labels" . | nindent 4 }}
 data:
   range-server.yaml: |-
-{{ .Values.rsconfig.range_server_config | indent 4 }}
+{{ .Values.config.range_server_config | indent 4 }}
   range-server-log.yaml: |-
-{{ .Values.rsconfig.range_server_log_config | indent 4}}
+{{ .Values.config.range_server_log_config | indent 4}}
