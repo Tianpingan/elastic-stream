@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "range-server.fullname" . }}
+  labels:
+    {{- include "range-server.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "range-server.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "range-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "range-server.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            {{- range $key, $val := .Values.service.ports }}
+            - containerPort: {{ $val }}
+              protocol: TCP
+              name: {{ $key }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: range-server-config
+              mountPath: /etc/range-server
+            - name: range-server-store
+              mountPath: {{ .Values.storage.path | default "/data/store" | quote }}
+
+      volumes:
+        - name: range-server-config
+          configMap:
+            name: {{ include "range-server.fullname" .}}-cfg
+
+  volumeClaimTemplates:
+  - metadata:
+      name: range-server-store
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: {{ .Values.storage.storageClassName | quote }}
+      resources:
+        requests:
+          storage: {{ .Values.storage.size | quote }}

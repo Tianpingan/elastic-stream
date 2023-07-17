@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "pd.fullname" . }}
+  labels:
+    {{- include "pd.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "pd.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "pd.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pd.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            {{- range $key, $val := .Values.service.ports }}
+            - containerPort: {{ $val }}
+              protocol: TCP
+              name: {{ $key }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: pd-data
+              mountPath: {{ .Values.storage.path | default "/data/placement-driver" | quote }}
+          env:
+            - name: NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PD_PEERURLS
+              value: "http://0.0.0.0:12380"
+            - name: PD_CLIENTURLS
+              value: "http://0.0.0.0:12379"
+            - name: PD_ADVERTISEPEERURLS
+              value: "http://$(NAME).pd:12380"
+            - name: PD_ADVERTISECLIENTURLS
+              value: "http://$(NAME).pd:12379"
+            - name: PD_NAME
+              value: "$(NAME)"
+            - name: PD_DATADIR
+              value: "/data/placement-driver/default.$(NAME)"
+            - name: PD_INITIALCLUSTER
+              value: "pd-0=http://pd-0.pd:12380,pd-1=http://pd-1.pd:12380,pd-2=http://pd-2.pd:12380"
+            - name: PD_PDADDR
+              value: "0.0.0.0:12378"
+            - name: PD_ADVERTISEPDADDR
+              value: "$(NAME).pd:12378"
+            - name: PD_ETCD_INITIALCLUSTERTOKEN
+              value: "pd-cluster"
+  volumeClaimTemplates:
+  - metadata:
+      name: pd-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: {{ .Values.storage.storageClassName | quote }}
+      resources:
+        requests:
+          storage: {{ .Values.storage.size | quote }}
