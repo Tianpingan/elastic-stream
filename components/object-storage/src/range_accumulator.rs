@@ -1,16 +1,16 @@
 use config::ObjectStorageConfig;
+use log::warn;
 use std::{
     cell::RefCell,
     rc::Rc,
     time::{Duration, Instant},
 };
 use store::error::FetchError;
-use tokio::{
-    sync::mpsc::{self, UnboundedReceiver},
-    time::sleep,
-};
+use tokio::{sync::mpsc, time::sleep};
 
-use crate::{range_fetcher::RangeFetcher, range_offload::RangeOffload, ObjectManager, RangeKey};
+use crate::{
+    range_fetcher::RangeFetcher, range_offload::RangeOffload, ObjectManager, RangeKey, ShutdownRx,
+};
 
 pub trait RangeAccumulator {
     fn accumulate(&self, records_size: u32) -> (i32, bool);
@@ -22,7 +22,7 @@ pub trait RangeAccumulator {
 
 pub struct DefaultRangeAccumulator {
     size: RefCell<u32>,
-    tx: mpsc::UnboundedSender<EventKind>,
+    tx: mpsc::Sender<EventKind>,
     object_size: u32,
     part_size: u32,
     timestamp: RefCell<Instant>,
@@ -41,7 +41,9 @@ impl RangeAccumulator for DefaultRangeAccumulator {
             // trigger offload when there unloaded records size is large than object_size.
             *size = 0;
             self.timestamp.replace(Instant::now());
-            let _ = self.tx.send(EventKind::ObjectFull);
+            let _ = self.tx.try_send(EventKind::ObjectFull).map_err(|e| {
+                warn!("send object full event failed: {}", e);
+            });
             (-(old_size as i32), false)
         } else {
             *size += records_size;
@@ -60,7 +62,9 @@ impl RangeAccumulator for DefaultRangeAccumulator {
             let old_size = *size;
             *timestamp = Instant::now();
             *size = 0;
-            let _ = self.tx.send(EventKind::TimeExpired);
+            let _ = self.tx.try_send(EventKind::TimeExpired).map_err(|e| {
+                warn!("send time expired event failed: {}", e);
+            });
             -(old_size as i32)
         } else {
             0
@@ -76,7 +80,9 @@ impl RangeAccumulator for DefaultRangeAccumulator {
         if *size >= self.part_size {
             let old_size = *size;
             *size = 0;
-            let _ = self.tx.send(EventKind::PartFull);
+            let _ = self.tx.try_send(EventKind::PartFull).map_err(|e| {
+                warn!("send part full event failed: {}", e);
+            });
             -(old_size as i32)
         } else {
             0
@@ -91,10 +97,9 @@ impl DefaultRangeAccumulator {
         range_fetcher: Rc<F>,
         config: ObjectStorageConfig,
         range_offload: Rc<RangeOffload<M>>,
+        shutdown_rx: ShutdownRx,
     ) -> Self {
-        // TODO: implement drop to close the read_loop
-        let (tx, rx) = mpsc::unbounded_channel();
-
+        let (tx, rx) = mpsc::channel(16);
         Self::read_loop(
             range,
             start_offset,
@@ -102,6 +107,7 @@ impl DefaultRangeAccumulator {
             rx,
             range_fetcher,
             range_offload,
+            shutdown_rx,
         );
 
         DefaultRangeAccumulator {
@@ -117,57 +123,79 @@ impl DefaultRangeAccumulator {
         range: RangeKey,
         start_offset: u64,
         object_size: u32,
-        mut rx: UnboundedReceiver<EventKind>,
+        mut rx: mpsc::Receiver<EventKind>,
         range_fetcher: Rc<F>,
         range_offload: Rc<RangeOffload<M>>,
+        shutdown_rx: ShutdownRx,
     ) {
         tokio_uring::spawn(async move {
             let stream_id = range.stream_id;
             let range_index = range.range_index;
             let mut next_offset = start_offset;
-            while let Some(event) = rx.recv().await {
-                let mut force_flush = false;
-                if let EventKind::TimeExpired = event {
-                    force_flush = true;
-                }
-                loop {
-                    match range_fetcher
-                        .fetch(
-                            stream_id,
-                            range_index,
-                            next_offset,
-                            u64::MAX,
-                            object_size * 3 / 2,
-                        )
-                        .await
-                    {
-                        Ok(records) => {
-                            if records.payload.is_empty() {
-                                // read to end
-                                break;
-                            }
-                            next_offset = range_offload.write(next_offset, records.payload);
-                        }
-                        Err(e) => match e {
-                            FetchError::NoRecord => {
-                                break;
-                            }
-                            _ => {
-                                log::error!(
-                                    "fetch range{stream_id}#{range_index} failed, retry later, {}",
-                                    e
-                                );
-                                sleep(Duration::from_secs(1)).await;
-                                continue;
-                            }
-                        },
+            let mut notify_shutdown_rx = shutdown_rx.subscribe();
+            loop {
+                tokio::select! {
+                    _ = notify_shutdown_rx.recv() => {
+                        range_offload.flush().await;
+                        log::info!("range accumulator for range{stream_id}#{range_index} shutdown");
+                        break;
                     }
-                }
-                if force_flush {
-                    range_offload.flush();
+                    Some(event) = rx.recv() => {
+                        if let EventKind::Close = event {
+                            range_offload.flush().await;
+                            log::info!("range accumulator for range{stream_id}#{range_index} close");
+                            break;
+                        }
+                        let mut force_flush = false;
+                        if let EventKind::TimeExpired = event {
+                            force_flush = true;
+                        }
+                        loop {
+                            match range_fetcher
+                                .fetch(
+                                    stream_id,
+                                    range_index,
+                                    next_offset,
+                                    u64::MAX,
+                                    object_size * 3 / 2,
+                                )
+                                .await
+                            {
+                                Ok(records) => {
+                                    if records.payload.is_empty() {
+                                        // read to end
+                                        break;
+                                    }
+                                    next_offset = range_offload.write(next_offset, records.payload).await;
+                                }
+                                Err(e) => match e {
+                                    FetchError::NoRecord => {
+                                        break;
+                                    }
+                                    _ => {
+                                        log::error!(
+                                            "fetch range{stream_id}#{range_index} failed, retry later, {}",
+                                            e
+                                        );
+                                        sleep(Duration::from_secs(1)).await;
+                                        continue;
+                                    }
+                                },
+                            }
+                        }
+                        if force_flush {
+                            range_offload.trigger_flush();
+                        }
+                    }
                 }
             }
         });
+    }
+}
+
+impl Drop for DefaultRangeAccumulator {
+    fn drop(&mut self) {
+        let _ = self.tx.try_send(EventKind::Close);
     }
 }
 
@@ -175,4 +203,5 @@ enum EventKind {
     ObjectFull,
     PartFull,
     TimeExpired,
+    Close,
 }

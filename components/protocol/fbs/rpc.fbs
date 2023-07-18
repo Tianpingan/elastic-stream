@@ -73,10 +73,19 @@ enum ErrorCode : int16 {
     // leader nodes. Otherwise, use this code to signal the client to redirect future requests.
     PD_NOT_LEADER = 1503,
 
+    // When listing or watching resources, the resource version is too old and the PD server has compacted it.
+    PD_COMPACTED = 1504,
+
     // 25xx is reserved for range server errors
     RS_INTERNAL_SERVER_ERROR = 2500,
     RS_NOT_IMPLEMENTED = 2501,
     RS_DATA_CORRUPTED = 2502,
+
+    // Failed to create range on range server using the given metadata.
+    RS_CREATE_RANGE = 2503,
+
+    // Failed to seal range on range server
+    RS_SEAL_RANGE = 2504,
 }
 
 // Flag variants shared by multiple opcodes
@@ -389,7 +398,7 @@ table OffloadOwner {
     server_id: int32 = -1 (id: 0);
 
     // The epoch of the owner.
-    epoch: int64 = -1 (id: 1);
+    epoch: int16 = -1 (id: 1);
 }
 
 table Range {
@@ -661,7 +670,7 @@ table Obj {
     range_index: int32 = -1 (id: 1);
 
     // The epoch of the range server that offloads the object.
-    epoch: int64 = -1 (id: 2);
+    epoch: int16 = -1 (id: 2);
 
     // The start offset of the object in the range.
     start_offset: int64 = -1 (id: 3);
@@ -933,16 +942,16 @@ table TxnResponse {
     responses: [ResponseOp] (id: 2);
 }
 
-table ReportReplicaProgressRequest {
+table ReportRangeProgressRequest {
     // The timeout in milliseconds to wait for the response.
     timeout_ms: int32 (id: 0);
 
     range_server: RangeServer (id: 1, required);
 
-    replica_progress: [ReplicaProgress] (id: 2, required);
+    range_progress: [RangeProgress] (id: 2, required);
 }
 
-table ReplicaProgress {
+table RangeProgress {
     stream_id: int64 (id: 0);
 
     range_index: int32 (id: 1);
@@ -950,7 +959,7 @@ table ReplicaProgress {
     confirm_offset: int64 (id: 2);
 }
 
-table ReportReplicaProgressResponse {
+table ReportRangeProgressResponse {
     status: Status (id: 0, required);
 
     throttle_time_ms: int32 (id: 1);

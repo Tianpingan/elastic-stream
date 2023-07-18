@@ -121,3 +121,15 @@ func (b *baseHandler) ReportMetrics(_ *protocol.ReportMetricsRequest, resp *prot
 func (b *baseHandler) DescribePDCluster(_ *protocol.DescribePDClusterRequest, resp *protocol.DescribePDClusterResponse) {
 	resp.OK()
 }
+
+func (b *baseHandler) CommitObject(_ *protocol.CommitObjectRequest, resp *protocol.CommitObjectResponse) {
+	resp.OK()
+}
+
+func (b *baseHandler) ListResource(_ *protocol.ListResourceRequest, resp *protocol.ListResourceResponse) {
+	resp.OK()
+}
+
+func (b *baseHandler) WatchResource(_ *protocol.WatchResourceRequest, resp *protocol.WatchResourceResponse) {
+	resp.OK()
+}

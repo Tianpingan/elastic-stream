@@ -24,7 +24,9 @@ type Storage interface {
 	// KV is used to provide the basic key-value read/write ability.
 	kv.KV
 
-	endpoint.Stream
-	endpoint.Range
-	endpoint.RangeServer
+	endpoint.StreamEndpoint
+	endpoint.RangeEndpoint
+	endpoint.RangeServerEndpoint
+	endpoint.ObjectEndpoint
+	endpoint.ResourceEndpoint
 }

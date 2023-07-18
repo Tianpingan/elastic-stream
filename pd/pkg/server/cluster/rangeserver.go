@@ -19,7 +19,7 @@ var (
 	ErrNotEnoughRangeServers = errors.New("not enough range servers")
 )
 
-type RangeServer interface {
+type RangeServerService interface {
 	Heartbeat(ctx context.Context, rangeServer *rpcfb.RangeServerT) error
 	AllocateID(ctx context.Context) (int32, error)
 	Metrics(ctx context.Context, rangeServer *rpcfb.RangeServerT, metrics *rpcfb.RangeServerMetricsT) error
@@ -53,7 +53,7 @@ func (c *RaftCluster) Heartbeat(ctx context.Context, rangeServer *rpcfb.RangeSer
 func (c *RaftCluster) AllocateID(ctx context.Context) (int32, error) {
 	logger := c.lg.With(traceutil.TraceLogField(ctx))
 
-	id, err := c.dnAlloc.Alloc(ctx)
+	id, err := c.rsAlloc.Alloc(ctx)
 	if err != nil {
 		logger.Error("failed to allocate range server id", zap.Error(err))
 		if errors.Is(err, kv.ErrTxnFailed) {

@@ -20,18 +20,17 @@ const (
 
 	// ranges in stream
 	_rangeStreamPath         = "ranges"
-	_rangeStreamPrefix       = "s"
-	_rangeStreamPrefixFormat = _rangeStreamPrefix + kv.KeySeparator + _streamIDFormat + kv.KeySeparator + _rangeStreamPath + kv.KeySeparator
-	_rangeStreamFormat       = _rangeStreamPrefix + kv.KeySeparator + _streamIDFormat + kv.KeySeparator + _rangeStreamPath + kv.KeySeparator + _rangeIDFormat
-	_rangeStreamKeyLen       = len(_rangeStreamPrefix) + len(kv.KeySeparator) + _streamIDLen + len(kv.KeySeparator) + len(_rangeStreamPath) + len(kv.KeySeparator) + _rangeIDLen
+	_rangePrefix             = _rangeStreamPath + kv.KeySeparator
+	_rangeStreamPrefixFormat = _rangeStreamPath + kv.KeySeparator + _streamIDFormat + kv.KeySeparator
+	_rangeStreamFormat       = _rangeStreamPath + kv.KeySeparator + _streamIDFormat + kv.KeySeparator + _rangeIDFormat
+	_rangeStreamKeyLen       = len(_rangeStreamPath) + len(kv.KeySeparator) + _streamIDLen + len(kv.KeySeparator) + _rangeIDLen
 
 	// ranges on range server
-	_rangeOnServerPath               = "stream-range"
-	_rangeOnServerPrefix             = "rs"
-	_rangeOnServerPrefixFormat       = _rangeOnServerPrefix + kv.KeySeparator + _rangeServerIDFormat + kv.KeySeparator + _rangeOnServerPath + kv.KeySeparator
-	_rangeOnServerStreamPrefixFormat = _rangeOnServerPrefix + kv.KeySeparator + _rangeServerIDFormat + kv.KeySeparator + _rangeOnServerPath + kv.KeySeparator + _streamIDFormat + kv.KeySeparator
-	_rangeOnServerFormat             = _rangeOnServerPrefix + kv.KeySeparator + _rangeServerIDFormat + kv.KeySeparator + _rangeOnServerPath + kv.KeySeparator + _streamIDFormat + kv.KeySeparator + _rangeIDFormat
-	_rangeOnServerKeyLen             = len(_rangeOnServerPrefix) + len(kv.KeySeparator) + _rangeServerIDLen + len(kv.KeySeparator) + len(_rangeOnServerPath) + len(kv.KeySeparator) + _streamIDLen + len(kv.KeySeparator) + _rangeIDLen
+	_rangeOnServerPath               = "ranges-rs"
+	_rangeOnServerPrefixFormat       = _rangeOnServerPath + kv.KeySeparator + _rangeServerIDFormat + kv.KeySeparator
+	_rangeOnServerStreamPrefixFormat = _rangeOnServerPath + kv.KeySeparator + _rangeServerIDFormat + kv.KeySeparator + _streamIDFormat + kv.KeySeparator
+	_rangeOnServerFormat             = _rangeOnServerPath + kv.KeySeparator + _rangeServerIDFormat + kv.KeySeparator + _streamIDFormat + kv.KeySeparator + _rangeIDFormat
+	_rangeOnServerKeyLen             = len(_rangeOnServerPath) + len(kv.KeySeparator) + _rangeServerIDLen + len(kv.KeySeparator) + _streamIDLen + len(kv.KeySeparator) + _rangeIDLen
 
 	_rangeByRangeLimit = 1e4
 )
@@ -41,7 +40,7 @@ type RangeID struct {
 	Index    int32
 }
 
-type Range interface {
+type RangeEndpoint interface {
 	CreateRange(ctx context.Context, rangeT *rpcfb.RangeT) error
 	UpdateRange(ctx context.Context, rangeT *rpcfb.RangeT) (*rpcfb.RangeT, error)
 	GetRange(ctx context.Context, rangeID *RangeID) (*rpcfb.RangeT, error)
@@ -99,7 +98,7 @@ func (e *Endpoint) UpdateRange(ctx context.Context, rangeT *rpcfb.RangeT) (*rpcf
 		return nil, errors.Wrap(err, "update range")
 	}
 	if prevValue == nil {
-		logger.Warn("range not found when update range")
+		logger.Warn("range not found when updating")
 		return nil, nil
 	}
 
@@ -151,7 +150,7 @@ func (e *Endpoint) GetRanges(ctx context.Context, rangeIDs []*RangeID) ([]*rpcfb
 func (e *Endpoint) GetLastRange(ctx context.Context, streamID int64) (*rpcfb.RangeT, error) {
 	logger := e.lg.With(zap.Int64("stream-id", streamID), traceutil.TraceLogField(ctx))
 
-	kvs, _, err := e.GetByRange(ctx, kv.Range{StartKey: rangePathInSteam(streamID, MinRangeIndex), EndKey: e.endRangePathInStream(streamID)}, 1, true)
+	kvs, _, _, err := e.GetByRange(ctx, kv.Range{StartKey: rangePathInSteam(streamID, MinRangeIndex), EndKey: e.endRangePathInStream(streamID)}, 0, 1, true)
 	if err != nil {
 		logger.Error("failed to get last range", zap.Error(err))
 		return nil, err
@@ -200,7 +199,7 @@ func (e *Endpoint) forEachRangeInStreamLimited(ctx context.Context, streamID int
 	logger := e.lg.With(zap.Int64("stream-id", streamID), traceutil.TraceLogField(ctx))
 
 	startKey := rangePathInSteam(streamID, startID)
-	kvs, more, err := e.GetByRange(ctx, kv.Range{StartKey: startKey, EndKey: e.endRangePathInStream(streamID)}, limit, false)
+	kvs, _, more, err := e.GetByRange(ctx, kv.Range{StartKey: startKey, EndKey: e.endRangePathInStream(streamID)}, 0, limit, false)
 	if err != nil {
 		logger.Error("failed to get ranges", zap.Int32("start-id", startID), zap.Int64("limit", limit), zap.Error(err))
 		return MinRangeIndex - 1, errors.Wrap(err, "get ranges")
@@ -287,7 +286,7 @@ func (e *Endpoint) forEachRangeIDOnRangeServerLimited(ctx context.Context, range
 	logger := e.lg.With(zap.Int32("range-server-id", rangeServerID), traceutil.TraceLogField(ctx))
 
 	startKey := rangePathOnRangeServer(rangeServerID, startID.StreamID, startID.Index)
-	kvs, more, err := e.GetByRange(ctx, kv.Range{StartKey: startKey, EndKey: e.endRangePathOnRangeServer(rangeServerID)}, limit, false)
+	kvs, _, more, err := e.GetByRange(ctx, kv.Range{StartKey: startKey, EndKey: e.endRangePathOnRangeServer(rangeServerID)}, 0, limit, false)
 	if err != nil {
 		logger.Error("failed to get range ids by range server", zap.Int64("start-stream-id", startID.StreamID), zap.Int32("start-range-index", startID.Index), zap.Int64("limit", limit), zap.Error(err))
 		return nil, errors.Wrap(err, "get range ids by range server")
@@ -322,7 +321,7 @@ func (e *Endpoint) GetRangeIDsByRangeServerAndStream(ctx context.Context, stream
 	logger := e.lg.With(zap.Int64("stream-id", streamID), zap.Int32("range-server-id", rangeServerID), traceutil.TraceLogField(ctx))
 
 	startKey := rangePathOnRangeServer(rangeServerID, streamID, MinRangeIndex)
-	kvs, _, err := e.GetByRange(ctx, kv.Range{StartKey: startKey, EndKey: e.endRangePathOnRangeServerInStream(rangeServerID, streamID)}, 0, false)
+	kvs, _, _, err := e.GetByRange(ctx, kv.Range{StartKey: startKey, EndKey: e.endRangePathOnRangeServerInStream(rangeServerID, streamID)}, 0, 0, false)
 	if err != nil {
 		logger.Error("failed to get range ids by range server and stream", zap.Error(err))
 		return nil, errors.Wrap(err, "get range ids by range server and stream")

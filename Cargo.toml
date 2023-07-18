@@ -67,7 +67,6 @@ opendal = "0.38.0"
 log = { version = "0.4", features = [
     "max_level_trace",
     "release_max_level_info",
-    "kv_unstable_serde",
 ] }
 env_logger = "0.10"
 log4rs = "1.2"
@@ -107,6 +106,7 @@ prometheus = "0.13"
 
 serde = "1.0"
 serde_yaml = "0.9"
+envy = "0.4"
 
 local-sync = "0.1"
 
