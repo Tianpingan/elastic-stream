@@ -61,7 +61,7 @@ config:
     # Server configuration
     server:
       # Advertise host address
-      host: "range-server-0.range-server"
+      host: "range-server-0"
       # Listening port
       port: 10911
       # Number of Thread-per-Core Nodes

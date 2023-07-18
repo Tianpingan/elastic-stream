@@ -34,30 +34,30 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - name: pd-data
-              mountPath: {{ .Values.storage.path | default "/data/placement-driver" | quote }}
+              mountPath: {{ .Values.storage.mountPath | default "/data/placement-driver" | quote }}
           env:
             - name: NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
             - name: PD_PEERURLS
-              value: "http://0.0.0.0:12380"
+              value: "http://0.0.0.0:{{ .Values.service.ports.peer }}"
             - name: PD_CLIENTURLS
-              value: "http://0.0.0.0:12379"
+              value: "http://0.0.0.0:{{ .Values.service.ports.client }}"
             - name: PD_ADVERTISEPEERURLS
-              value: "http://$(NAME).pd:12380"
+              value: "http://$(NAME).{{ include "pd.name" . }}:{{ .Values.service.ports.peer }}"
             - name: PD_ADVERTISECLIENTURLS
-              value: "http://$(NAME).pd:12379"
+              value: "http://$(NAME).{{ include "pd.name" . }}:{{ .Values.service.ports.client }}"
             - name: PD_NAME
               value: "$(NAME)"
             - name: PD_DATADIR
-              value: "/data/placement-driver/default.$(NAME)"
+              value:  "{{ .Values.storage.mountPath }}/default.$(NAME)"
             - name: PD_INITIALCLUSTER
-              value: "pd-0=http://pd-0.pd:12380,pd-1=http://pd-1.pd:12380,pd-2=http://pd-2.pd:12380"
+              value: "pd-0=http://pd-0.{{ include "pd.name" . }}:{{ .Values.service.ports.peer }},pd-1=http://pd-1.{{ include "pd.name" . }}:{{ .Values.service.ports.peer }},pd-2=http://pd-2.{{ include "pd.name" . }}:{{ .Values.service.ports.peer }}"
             - name: PD_PDADDR
-              value: "0.0.0.0:12378"
+              value: "0.0.0.0:{{ .Values.service.ports.server }}"
             - name: PD_ADVERTISEPDADDR
-              value: "$(NAME).pd:12378"
+              value: "$(NAME).{{ include "pd.name" . }}:{{ .Values.service.ports.server }}"
             - name: PD_ETCD_INITIALCLUSTERTOKEN
               value: "pd-cluster"
   volumeClaimTemplates:
