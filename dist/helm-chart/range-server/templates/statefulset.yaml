@@ -24,6 +24,7 @@ spec:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/range-server", "start"]
           ports:
             {{- range $key, $val := .Values.service.ports }}
             - containerPort: {{ $val }}
@@ -33,16 +34,19 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
-            - name: range-server-config
-              mountPath: /etc/range-server
             - name: range-server-store
               mountPath: {{ .Values.storage.path | default "/data/store" | quote }}
-
-      volumes:
-        - name: range-server-config
-          configMap:
-            name: {{ include "range-server.fullname" .}}-cfg
-
+          env:
+            - name: NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: ES_ADDR
+              value: "0.0.0.0:{{ .Values.service.ports.server }}"
+            - name: ES_ADVERTISE_ADDR
+              value: "$(NAME).{{ include "range-server.name" . }}:{{ .Values.service.ports.server }}"
+            - name: ES_PD
+              value: "{{ .Values.pdAddress }}"
   volumeClaimTemplates:
   - metadata:
       name: range-server-store

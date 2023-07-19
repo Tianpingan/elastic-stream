@@ -7,7 +7,6 @@ metadata:
 spec:
   serviceName: {{ include "pd.fullname" . }}
   replicas: {{ .Values.replicaCount }}
-  podManagementPolicy: Parallel
   selector:
     matchLabels:
       {{- include "pd.selectorLabels" . | nindent 6 }}
@@ -24,6 +23,7 @@ spec:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/pd", "--config", "/etc/pd/config.yaml"]
           ports:
             {{- range $key, $val := .Values.service.ports }}
             - containerPort: {{ $val }}

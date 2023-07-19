@@ -5,10 +5,10 @@
 replicaCount: 3
 
 image:
-  repository: elasticstream/pd
+  repository: elasticstream/elastic-stream
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "nightly"
+  tag: ""
 
 imagePullSecrets: []
 nameOverride: ""
