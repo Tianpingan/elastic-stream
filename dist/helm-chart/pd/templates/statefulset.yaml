@@ -53,7 +53,13 @@ spec:
             - name: PD_DATADIR
               value:  "{{ .Values.storage.mountPath }}/default.$(NAME)"
             - name: PD_INITIALCLUSTER
-              value: "pd-0=http://pd-0.{{ include "pd.name" . }}:{{ .Values.service.ports.peer }},pd-1=http://pd-1.{{ include "pd.name" . }}:{{ .Values.service.ports.peer }},pd-2=http://pd-2.{{ include "pd.name" . }}:{{ .Values.service.ports.peer }}"
+              value: ""
+            {{ $replicaCount := int .Values.replicaCount}}
+            {{ $dot := . }}
+            {{ range $podIndex := until $replicaCount }}
+            - name: PD_INITIALCLUSTER
+              value: "$(PD_INITIALCLUSTER)pd-{{$podIndex}}=http://pd-{{$podIndex}}.{{ include "pd.name" $dot }}:{{ $.Values.service.ports.peer }},"
+            {{ end }}
             - name: PD_PDADDR
               value: "0.0.0.0:{{ .Values.service.ports.server }}"
             - name: PD_ADVERTISEPDADDR
