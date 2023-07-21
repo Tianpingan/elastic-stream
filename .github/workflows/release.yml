@@ -10,8 +10,8 @@ jobs:
     name: Release with Debian Packages and Docker Images
     strategy:
       matrix:
-        go-version: [ "1.20" ]
-        platform: [ "ubuntu-22.04" ]
+        go-version: ["1.20"]
+        platform: ["ubuntu-22.04"]
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout Code
@@ -63,7 +63,7 @@ jobs:
     name: Publish snapshot package to the Maven Central Repository
     strategy:
       matrix:
-        platform: [ "ubuntu-22.04" ]
+        platform: ["ubuntu-22.04"]
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout
@@ -83,7 +83,7 @@ jobs:
         uses: actions/setup-java@v3
         with:
           distribution: "zulu"
-          java-version: '17'
+          java-version: "17"
       - name: Build Packages
         working-directory: ./sdks/frontend-java
         run: mvn -DargLine="--add-opens=java.base/java.nio=ALL-UNNAMED" clean package
@@ -92,8 +92,8 @@ jobs:
       - name: Set up Apache Maven Central
         uses: actions/setup-java@v3
         with: # running setup-java again overwrites the settings.xml
-          distribution: 'zulu'
-          java-version: '17'
+          distribution: "zulu"
+          java-version: "17"
           server-id: maven # Value of the distributionManagement/repository/id field of the pom.xml
           server-username: MAVEN_USERNAME # env variable for username in deploy
           server-password: MAVEN_CENTRAL_TOKEN # env variable for token in deploy
@@ -107,3 +107,30 @@ jobs:
           MAVEN_USERNAME: mooc9988
           MAVEN_CENTRAL_TOKEN: ${{ secrets.MAVEN_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+  upgrade-helm-chart:
+    name: Upgrade helm chart on private k3s
+    runs-on: private-k3s
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Download artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: helm-chart-artifact
+          path: helm-chart
+
+      - name: Update Helm Chart
+        working-directory: ./dist/helm-chart
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.DEV_KUBE_CONFIG_DATA }}
+        run: |
+          version=$(git describe --tags --always --dirty | sed -e 's/^[^0-9]*//')
+          awk '{sub(/appVersion:.*$/,"appVersion: '"$version"'");print $0}' pd/Chart.yaml > temp && mv temp pd/Chart.yaml
+          awk '{sub(/appVersion:.*$/,"appVersion: '"$version"'");print $0}' range-server/Chart.yaml > temp && mv temp range-server/Chart.yaml
+          echo $KUBE_CONFIG_DATA | base64 -d > /tmp/config
+
+          helm upgrade  pd pd \
+          -n elastic-stream \
+          --reuse-values \
+          --kubeconfig /tmp/config \
+          --wait --timeout 10m
