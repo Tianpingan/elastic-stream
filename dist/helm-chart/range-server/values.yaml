@@ -24,7 +24,7 @@ pdAddress: "pd:12378"
 
 storage:
   mountPath: /data/store
-  storageClassName: "standard"
+  storageClassName: "longhorn"
   size: 15Gi
 
 resources:
