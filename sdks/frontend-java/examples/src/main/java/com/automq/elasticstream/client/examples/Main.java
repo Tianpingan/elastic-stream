@@ -1,126 +1,230 @@
+
 package com.automq.elasticstream.client.examples;
 
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.zip.CRC32;
 
 import com.automq.elasticstream.client.DefaultRecordBatch;
 import com.automq.elasticstream.client.api.AppendResult;
 import com.automq.elasticstream.client.api.Client;
 import com.automq.elasticstream.client.api.CreateStreamOptions;
 import com.automq.elasticstream.client.api.FetchResult;
-import com.automq.elasticstream.client.api.OpenStreamOptions;
 import com.automq.elasticstream.client.api.RecordBatchWithContext;
 import com.automq.elasticstream.client.api.Stream;
-import static org.junit.Assert.*;
+import java.util.Random;
 
 public class Main {
-
     public static void main(String[] args) throws Exception {
-        Client client = Client.builder().endpoint("127.0.0.1:12378").kvEndpoint("127.0.0.1:12379").build();
-        Stream stream = client.streamClient()
-                .createAndOpenStream(CreateStreamOptions.newBuilder().replicaCount(1).build()).get();
-        long streamId = stream.streamId();
+        LongRunningOption option = new LongRunningOption();
+        System.out.println("EndPoint: " + option.getEndPoint() + ", KvEndPoint: " + option.getKvEndPoint()
+                + ", ReplicaCount: " + option.getReplicaCount() + ", Interval: " + option.getInterval() + ", Min: "
+                + option.getMin() + ", Max: " + option.getMax());
 
-        System.out.println("Step1: append 10 records to stream:" + streamId);
-        int count = 1024 * 1024;
-        CountDownLatch latch = new CountDownLatch(count);
-        for (int i = 0; i < count; i++) {
-            int index = i;
-            byte[] payload = String.format("hello world %03d", i).getBytes(StandardCharsets.UTF_8);
-            ByteBuffer buffer = ByteBuffer.wrap(payload);
-            long startNanos = System.nanoTime();
-            CompletableFuture<AppendResult> cf = stream
-                    .append(new DefaultRecordBatch(1, 0, Collections.emptyMap(), buffer));
-            System.out.println("append " + index + " async cost:" + (System.nanoTime() - startNanos) / 1000 + "us");
-            cf.whenComplete((rst, ex) -> {
-                if (ex == null) {
-                    long offset = rst.baseOffset();
-                    assertEquals(index * 10, offset);
-                    System.out.println(
-                            "append " + index + " callback cost:" + (System.nanoTime() - startNanos) / 1000 + "us");
-                }
-                latch.countDown();
-            });
-        }
-        latch.await();
-
-        System.out.println("Step2: read 10 record batch one by one");
-        for (int i = 0; i < 10; i++) {
-            FetchResult fetchResult = stream.fetch(i * 10, i * 10 + 10, Integer.MAX_VALUE).get();
-            assertEquals(1, fetchResult.recordBatchList().size());
-            RecordBatchWithContext recordBatch = fetchResult.recordBatchList().get(0);
-            assertEquals(i * 10, recordBatch.baseOffset());
-            assertEquals(i * 10 + 10, recordBatch.lastOffset());
-
-            byte[] rawPayload = new byte[recordBatch.rawPayload().remaining()];
-            recordBatch.rawPayload().get(rawPayload);
-            String payloadStr = new String(rawPayload, StandardCharsets.UTF_8);
-            System.out.println("fetch record result offset[" + recordBatch.baseOffset() + ","
-                    + recordBatch.lastOffset() + "]" + " payload:" + payloadStr + ".");
-            assertEquals(String.format("hello world %03d", i), payloadStr);
-            fetchResult.free();
-        }
-
-        System.out.println("Step3: cross read 10 record batch");
-        for (int i = 0; i < 9; i++) {
-            FetchResult fetchResult = stream.fetch(i * 10, i * 10 + 11, Integer.MAX_VALUE).get();
-            assertEquals(2, fetchResult.recordBatchList().size());
-            for (int j = 0; j < 2; j++) {
-                int index = i + j;
-                RecordBatchWithContext recordBatch = fetchResult.recordBatchList().get(j);
-                assertEquals(index * 10, recordBatch.baseOffset());
-                assertEquals(index * 10 + 10, recordBatch.lastOffset());
-                byte[] rawPayload = new byte[recordBatch.rawPayload().remaining()];
-                recordBatch.rawPayload().get(rawPayload);
-                String payloadStr = new String(rawPayload, StandardCharsets.UTF_8);
-                assertEquals(String.format("hello world %03d", index), payloadStr);
-                System.out.println("fetch record result offset[" + recordBatch.baseOffset() + ","
-                        + recordBatch.lastOffset() + "]" + " payload:" + payloadStr + ".");
-            }
-            fetchResult.free();
-        }
-
-        System.out.println("Step4: reopen stream");
-        stream.close().get();
-        stream = client.streamClient().openStream(streamId, OpenStreamOptions.newBuilder().build()).get();
-
-        System.out.println("Step5: append more 10 record batches");
-        for (int i = 0; i < 10; i++) {
-            int index = i + 10;
-            byte[] payload = String.format("hello world %03d", index).getBytes(StandardCharsets.UTF_8);
-            ByteBuffer buffer = ByteBuffer.wrap(payload);
-            AppendResult appendResult = stream
-                    .append(new DefaultRecordBatch(10, 0, Collections.emptyMap(), buffer)).get();
-            long offset = appendResult.baseOffset();
-            System.out.println("append record result offset:" + offset);
-            assertEquals(index * 10, offset);
-        }
-
-        System.out.println("Step6: read 20 record batch one by one");
-        for (int i = 0; i < 20; i++) {
-            FetchResult fetchResult = stream.fetch(i * 10, i * 10 + 10, Integer.MAX_VALUE).get();
-            assertEquals(1, fetchResult.recordBatchList().size());
-            RecordBatchWithContext recordBatch = fetchResult.recordBatchList().get(0);
-            assertEquals(i * 10, recordBatch.baseOffset());
-            assertEquals(i * 10 + 10, recordBatch.lastOffset());
-
-            byte[] rawPayload = new byte[recordBatch.rawPayload().remaining()];
-            recordBatch.rawPayload().get(rawPayload);
-            String payloadStr = new String(rawPayload, StandardCharsets.UTF_8);
-            System.out.println("fetch record result offset[" + recordBatch.baseOffset() + ","
-                    + recordBatch.lastOffset() + "]" + " payload:" + payloadStr + ".");
-            assertEquals(String.format("hello world %03d", i), payloadStr);
-            fetchResult.free();
-        }
-
+        Client client = Client.builder().endpoint(option.getEndPoint()).kvEndpoint(option.getKvEndPoint()).build();
         while (true) {
-            TimeUnit.SECONDS.sleep(1);
-            System.out.println("Tick");
+            Stream stream = client.streamClient()
+                    .createAndOpenStream(
+                            CreateStreamOptions.newBuilder().replicaCount(option.getReplicaCount()).build())
+                    .get();
+            long streamId = stream.streamId();
+            System.out.println("Create StreamID: " + streamId);
+            BlockingQueue<Elem> crcQueue = new LinkedBlockingQueue<>(1024);
+            Thread producerThread = new Thread(
+                    new Producer(crcQueue, stream, option.getInterval(), option.getMin(), option.getMax()));
+            Thread consumerThread = new Thread(new Consumer(crcQueue, producerThread, stream));
+            producerThread.start();
+            consumerThread.start();
+
+            producerThread.join();
+            consumerThread.join();
+            stream.close().get();
+        }
+    }
+}
+
+class Elem {
+    long crc;
+    long offset;
+
+    Elem(long crc, long offset) {
+        this.crc = crc;
+        this.offset = offset;
+    }
+
+    long getCrc() {
+        return this.crc;
+    }
+
+    long getOffset() {
+        return this.offset;
+    }
+}
+
+class LongRunningOption {
+    private String endpoint = "127.0.0.1:12378";
+    private String kvEndpoint = "127.0.0.1:12379";
+    private int replicaCount = 1;
+    private long interval = 100;
+    private int min = 1024;
+    private int max = 4096;
+
+    public LongRunningOption() {
+        String endpoint = System.getenv("END_POINT");
+        if (endpoint != null) {
+            this.endpoint = endpoint;
+        }
+        String kvEndpoint = System.getenv("KV_END_POINT");
+        if (kvEndpoint != null) {
+            this.kvEndpoint = kvEndpoint;
+        }
+        String replicaCountStr = System.getenv("REPLICA_COUNT");
+        if (replicaCountStr != null) {
+            this.replicaCount = Integer.parseInt(replicaCountStr);
+        }
+        String intervalStr = System.getenv("INTERVAL");
+        if (intervalStr != null) {
+            this.interval = Long.parseLong(intervalStr);
+        }
+        String minStr = System.getenv("MIN");
+        if (minStr != null) {
+            this.min = Integer.parseInt(minStr);
+        }
+        String maxStr = System.getenv("MAX");
+        if (maxStr != null) {
+            this.max = Integer.parseInt(maxStr);
         }
     }
 
+    public String getEndPoint() {
+        return this.endpoint;
+    }
+
+    public String getKvEndPoint() {
+        return this.kvEndpoint;
+    }
+
+    public int getReplicaCount() {
+        return this.replicaCount;
+    }
+
+    public long getInterval() {
+        return this.interval;
+    }
+
+    public int getMin() {
+        return this.min;
+    }
+
+    public int getMax() {
+        return this.max;
+    }
+}
+
+class Utils {
+    public static byte[] generateRandomByteArray(int min, int max) {
+        int length = getRandomLength(min, max);
+        byte[] byteArray = new byte[length];
+        new Random().nextBytes(byteArray);
+        return byteArray;
+    }
+
+    public static int getRandomLength(int min, int max) {
+        Random random = new Random();
+        return min + random.nextInt(max - min);
+    }
+
+    public static long calculateCRC32(byte[] byteArray) {
+        CRC32 crc32 = new CRC32();
+        crc32.update(byteArray);
+        return crc32.getValue();
+    }
+}
+
+class Producer implements Runnable {
+    private final BlockingQueue<Elem> crcQueue;
+    private Stream stream;
+    private long interval;
+    private int min;
+    private int max;
+
+    public Producer(BlockingQueue<Elem> crcQueue, Stream stream, long interval, int min, int max) {
+        this.crcQueue = crcQueue;
+        this.stream = stream;
+        this.interval = interval;
+        this.min = min;
+        this.max = max;
+    }
+
+    @Override
+    public void run() {
+        while (true) {
+            byte[] payload = Utils.generateRandomByteArray(this.min, this.max);
+            long crc32 = Utils.calculateCRC32(payload);
+            ByteBuffer buffer = ByteBuffer.wrap(payload);
+            CompletableFuture<AppendResult> cf = stream
+                    .append(new DefaultRecordBatch(10, 0, Collections.emptyMap(), buffer));
+            cf.whenComplete((rst, ex) -> {
+                if (ex == null) {
+                    long offset = rst.baseOffset();
+                    try {
+                        crcQueue.put(new Elem(crc32, offset));
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                    System.out.println(
+                            "Append success: " + offset);
+                }
+            });
+            try {
+                Thread.sleep(this.interval);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+
+class Consumer implements Runnable {
+    private final BlockingQueue<Elem> crcQueue;
+    private final Thread producerThread;
+    private Stream stream;
+
+    public Consumer(BlockingQueue<Elem> crcQueue, Thread producerThread, Stream stream) {
+        this.crcQueue = crcQueue;
+        this.producerThread = producerThread;
+        this.stream = stream;
+    }
+
+    @Override
+    public void run() {
+        try {
+            while (true) {
+                if (crcQueue.isEmpty() && !producerThread.isAlive()) {
+                    return;
+                }
+                Elem elem = crcQueue.take();
+                FetchResult fetchResult = stream.fetch(elem.getOffset(), elem.getOffset() +
+                        10, Integer.MAX_VALUE)
+                        .get();
+                RecordBatchWithContext recordBatch = fetchResult.recordBatchList().get(0);
+                byte[] rawPayload = new byte[recordBatch.rawPayload().remaining()];
+                recordBatch.rawPayload().get(rawPayload);
+                long crc0 = elem.getCrc();
+                long crc = Utils.calculateCRC32(rawPayload);
+                if (crc != crc0) {
+                    System.out.println("Fetch Error!");
+                    return;
+                }
+                System.out.println("Fetch success: " + elem.getOffset());
+                fetchResult.free();
+            }
+        } catch (InterruptedException | ExecutionException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
 }
