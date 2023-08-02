@@ -96,7 +96,7 @@ jobs:
   upgrade-helm-chart:
     name: Upgrade helm chart on private k3s
     runs-on: private-k3s
-    needs: [elastic-stream-images]
+    needs: [elastic-stream-and-long-running-images]
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
