@@ -7,6 +7,9 @@ import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.CRC32;
 import com.automq.elasticstream.client.DefaultRecordBatch;
 import com.automq.elasticstream.client.api.AppendResult;
@@ -29,12 +32,14 @@ public class LongRunning {
                 + ", PayloadSizeMin: "
                 + option.getMin() + ", PayloadSizeMax: " + option.getMax());
         Client client = Client.builder().endpoint(option.getEndPoint()).kvEndpoint(option.getKvEndPoint()).build();
+        ExecutorService executor = Executors.newFixedThreadPool(9);
         for (int replica = 1; replica <= 3; replica++) {
             Stream stream = client.streamClient()
                     .createAndOpenStream(
                             CreateStreamOptions.newBuilder().replicaCount(replica).build())
                     .get();
-            createTask(stream, Utils.getRandomInt(0, 1024), option.getMin(), option.getMax(), option.getInterval());
+            createTask(stream, Utils.getRandomInt(0, 1024), option.getMin(),
+                    option.getMax(), option.getInterval(), executor);
         }
     }
 
@@ -42,15 +47,12 @@ public class LongRunning {
             int startSeq,
             int minSize,
             int maxSize,
-            long interval) {
-        Thread producerThread = new Thread(
-                new Producer(stream, startSeq, minSize, maxSize, interval));
-        Thread tailReadConsumerThread = new Thread(new TailReadConsumerThread(stream,
-                startSeq));
-        Thread repeatedReadConsumerThread = new Thread(new RepeatedReadConsumerThread(stream, startSeq));
-        producerThread.start();
-        tailReadConsumerThread.start();
-        repeatedReadConsumerThread.start();
+            long interval, ExecutorService executor) {
+        AtomicLong endOffset = new AtomicLong(0);
+        executor.submit(new Producer(stream, startSeq, minSize, maxSize, interval, endOffset));
+        executor.submit(new TailReadConsumerThread(stream,
+                startSeq, endOffset));
+        executor.submit(new RepeatedReadConsumerThread(stream, startSeq, endOffset));
     }
 }
 
@@ -64,14 +66,18 @@ class Producer implements Runnable {
     private long nextSeq;
     private long lastSeq;
     private ByteBuffer lastRecord;
+    private AtomicLong endOffset;
 
-    public Producer(Stream stream, long startSeq, int minSize, int maxSize, long interval) {
+    public Producer(Stream stream, long startSeq, int minSize, int maxSize, long interval,
+            AtomicLong endOffset) {
         this.stream = stream;
         this.startSeq = startSeq;
         this.minSize = minSize;
         this.maxSize = maxSize;
         this.nextSeq = startSeq;
+        this.interval = interval;
         this.lastSeq = -1;
+        this.endOffset = endOffset;
     }
 
     @Override
@@ -91,6 +97,7 @@ class Producer implements Runnable {
                 AppendResult result = this.stream
                         .append(new DefaultRecordBatch(1, 0, Collections.emptyMap(), buffer)).get();
                 log.info("Append a record batch, seq: " + this.nextSeq + ", offset: " + result.baseOffset());
+                this.endOffset.set(result.baseOffset() + 1);
                 this.nextSeq++;
             } catch (InterruptedException | ExecutionException e) {
                 log.error(e.toString());
@@ -106,12 +113,14 @@ class TailReadConsumerThread implements Runnable {
     private long startSeq;
     private long nextSeq;
     private long nextOffset;
+    private AtomicLong endOffset;
 
-    public TailReadConsumerThread(Stream stream, long startSeq) {
+    public TailReadConsumerThread(Stream stream, long startSeq, AtomicLong endOffset) {
         this.stream = stream;
         this.startSeq = startSeq;
         this.nextSeq = startSeq;
         this.nextOffset = 0;
+        this.endOffset = endOffset;
     }
 
     @Override
@@ -119,7 +128,7 @@ class TailReadConsumerThread implements Runnable {
         log.info("TailReadConsumerThread thread started");
         while (true) {
             try {
-                long endOffset = this.stream.nextOffset();
+                long endOffset = this.endOffset.get();
                 log.info("Tail read, nextSeq: " + this.nextSeq + ", nextOffset: " + nextOffset + ", endOffset: "
                         + endOffset);
                 FetchResult fetchResult = this.stream.fetch(this.nextOffset, endOffset,
@@ -150,10 +159,12 @@ class RepeatedReadConsumerThread implements Runnable {
     private static Logger log = Logger.getLogger(RepeatedReadConsumerThread.class.getClass());
     private Stream stream;
     private long startSeq;
+    private AtomicLong endOffset;
 
-    public RepeatedReadConsumerThread(Stream stream, long startSeq) {
+    public RepeatedReadConsumerThread(Stream stream, long startSeq, AtomicLong endOffset) {
         this.stream = stream;
         this.startSeq = startSeq;
+        this.endOffset = endOffset;
     }
 
     @Override
@@ -161,7 +172,7 @@ class RepeatedReadConsumerThread implements Runnable {
         log.info("RepeatedReadConsumer thread started");
         while (true) {
             try {
-                long endOffset = this.stream.nextOffset();
+                long endOffset = this.endOffset.get();
                 long startOffset = this.stream.startOffset();
                 log.info("Repeated read, startOffset: " + startOffset + ", endOffset: "
                         + endOffset);
