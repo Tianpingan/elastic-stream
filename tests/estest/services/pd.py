@@ -51,7 +51,7 @@ class PD(Service):
 
     def pids(self, node):
         try:
-            cmd = "ps | grep pd | awk '{print $1}'"
+            cmd = "ps -a | grep pd | awk '{print $1}'"
             pid_arr = [pid for pid in node.account.ssh_capture(cmd, allow_fail=True, callback=int)]
             return pid_arr
         except (RemoteCommandError, ValueError) as e:
