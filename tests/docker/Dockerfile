@@ -1,3 +1,17 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 FROM ubuntu:20.04
 
 # Do not ask for confirmations when running apt-get, etc.
@@ -9,10 +23,10 @@ ENV DEBIAN_FRONTEND noninteractive
 ARG ducker_creator=default
 LABEL ducker.creator=$ducker_creator
 
-RUN sed -i "s/archive.ubuntu./mirrors.aliyun./g" /etc/apt/sources.list
-RUN sed -i "s/deb.debian.org/mirrors.aliyun.com/g" /etc/apt/sources.list
-RUN sed -i "s/security.debian.org/mirrors.aliyun.com\/debian-security/g" /etc/apt/sources.list
-RUN sed -i "s/httpredir.debian.org/mirrors.aliyun.com\/debian-security/g" /etc/apt/sources.list
+# RUN sed -i "s/archive.ubuntu./mirrors.aliyun./g" /etc/apt/sources.list
+# RUN sed -i "s/deb.debian.org/mirrors.aliyun.com/g" /etc/apt/sources.list
+# RUN sed -i "s/security.debian.org/mirrors.aliyun.com\/debian-security/g" /etc/apt/sources.list
+# RUN sed -i "s/httpredir.debian.org/mirrors.aliyun.com\/debian-security/g" /etc/apt/sources.list
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -35,8 +49,8 @@ ENV PATH $PATH:$JDK_HOME/bin
 # we have to install git since it is included in openjdk:8 but not openjdk:11
 RUN apt update && apt install -y sudo git netcat iptables rsync unzip wget curl jq coreutils openssh-server net-tools vim python3-pip python3-dev libffi-dev libssl-dev cmake pkg-config libfuse-dev iperf traceroute iproute2 iputils-ping && apt-get -y clean
 RUN python3 -m pip install -U pip==21.1.1;
-RUN pip config set global.index-url http://mirrors.aliyun.com/pypi/simple
-RUN pip config set install.trusted-host mirrors.aliyun.com
+# RUN pip config set global.index-url http://mirrors.aliyun.com/pypi/simple
+# RUN pip config set install.trusted-host mirrors.aliyun.com
 RUN pip3 install --upgrade cffi virtualenv pyasn1 boto3 pycrypto pywinrm ipaddress enum34 debugpy && pip3 install --upgrade "ducktape>0.8"
 
 # Set up ssh
