@@ -66,11 +66,13 @@ class PD(Service):
         self.signal_node(node, signal.SIGKILL)
         wait_until(lambda: not self.alive(node), timeout_sec=60, err_msg="Timed out waiting for PD to be killed.")
 
+
     def stop_node(self, node):
         idx = self.idx(node)
         self.logger.info("Stopping %s node %d on %s" % (type(self).__name__, idx, node.account.hostname))
         self.signal_node(node)
         wait_until(lambda: not self.alive(node), timeout_sec=60, err_msg="Timed out waiting for PD to stop.")
+
 
     def signal_node(self, node, sig=signal.SIGTERM):
         pids = self.pids(node)

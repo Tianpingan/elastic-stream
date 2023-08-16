@@ -29,15 +29,22 @@ const (
 	// FlagResponse indicates whether the frame is a response frame.
 	// If set, the frame contains the response payload to a specific request frame identified by a stream identifier.
 	// If not set, the frame represents a request frame.
-	FlagResponse Flags = 0x1
+	FlagResponse = Flags(rpcfb.CommonFlagsRESPONSE)
 
 	// FlagResponseEnd indicates whether the response frame is the last frame of the response.
 	// If set, the frame is the last frame in a response sequence.
 	// If not set, the response sequence continues with more frames.
-	FlagResponseEnd Flags = 0x1 << 1
+	FlagResponseEnd = Flags(rpcfb.CommonFlagsEND_OF_STREAM)
 
 	// FlagSystemError indicates whether the response frame is a system error response.
-	FlagSystemError Flags = 0x1 << 2
+	FlagSystemError = Flags(rpcfb.CommonFlagsSYSTEM_ERROR)
+)
+
+const (
+	// FlagGoAwayMaintenance indicates the server is going to perform maintenance shortly.
+	// No new connection/stream will be served for current epoch.
+	// Servers will broadcast GOAWAY frames to existing streams/connections, instructing clients to conduct fail-over as soon as possible.
+	FlagGoAwayMaintenance = Flags(rpcfb.GoAwayFlagsSERVER_MAINTENANCE)
 )
 
 // Flags is a bitmask of SBP flags.
@@ -175,7 +182,7 @@ func (fr *Framer) ReadFrame() (frame Frame, free func(), err error) {
 	buf := fr.fixedBuf[:_fixedHeaderLen]
 	_, err = io.ReadFull(fr.r, buf)
 	if err != nil {
-		return &baseFrame{}, nil, errors.Wrap(err, "read fixed header")
+		return &baseFrame{}, nil, errors.WithMessage(err, "read fixed header")
 	}
 	headerBuf := bytes.NewBuffer(buf)
 
@@ -207,7 +214,7 @@ func (fr *Framer) ReadFrame() (frame Frame, free func(), err error) {
 	_, err = io.ReadFull(fr.r, tBuf)
 	if err != nil {
 		free()
-		return &baseFrame{}, nil, errors.Wrap(err, "read extended header and payload")
+		return &baseFrame{}, nil, errors.WithMessage(err, "read extended header and payload")
 	}
 
 	header := func() []byte {
@@ -227,7 +234,7 @@ func (fr *Framer) ReadFrame() (frame Frame, free func(), err error) {
 	err = binary.Read(fr.r, binary.BigEndian, &checksum)
 	if err != nil {
 		free()
-		return &baseFrame{}, nil, errors.Wrap(err, "read payload checksum")
+		return &baseFrame{}, nil, errors.WithMessage(err, "read payload checksum")
 	}
 	if payloadLen > 0 {
 		if ckm := crc32.ChecksumIEEE(payload); ckm != checksum {
@@ -335,7 +342,7 @@ func (fr *Framer) endWrite() error {
 	_, err := fr.w.Write(fr.wbuf)
 	if err != nil {
 		logger.Error("failed to write frame", zap.Error(err))
-		return errors.Wrap(err, "write frame")
+		return errors.WithMessage(err, "write frame")
 	}
 	return nil
 }
@@ -371,14 +378,17 @@ type GoAwayFrame struct {
 }
 
 // NewGoAwayFrame creates a new GoAway frame
-func NewGoAwayFrame(maxStreamID uint32, isResponse bool) *GoAwayFrame {
+func NewGoAwayFrame(maxStreamID uint32, isResponse bool, isShutdown bool) *GoAwayFrame {
 	f := &GoAwayFrame{baseFrame{
 		OpCode:    rpcfb.OperationCodeGOAWAY,
 		StreamID:  maxStreamID,
 		HeaderFmt: DefaultFormat(),
 	}}
 	if isResponse {
-		f.Flag = FlagResponse | FlagResponseEnd
+		f.Flag |= FlagResponse | FlagResponseEnd
+	}
+	if isShutdown {
+		f.Flag |= FlagGoAwayMaintenance
 	}
 	return f
 }

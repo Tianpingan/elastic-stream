@@ -105,6 +105,7 @@ func TestHandler_CreateStream(t *testing.T) {
 func TestHandler_DeleteStream(t *testing.T) {
 	type args struct {
 		streamID int64
+		epoch    int64
 	}
 	type want struct {
 		stream rpcfb.StreamT
@@ -120,9 +121,9 @@ func TestHandler_DeleteStream(t *testing.T) {
 	}{
 		{
 			name: "normal case",
-			args: args{streamID: 1},
+			args: args{streamID: 1, epoch: 1},
 			want: want{
-				stream: rpcfb.StreamT{StreamId: 1, Replica: 3, AckCount: 3, Deleted: true},
+				stream: rpcfb.StreamT{StreamId: 1, Replica: 3, AckCount: 3, Epoch: 1, Deleted: true},
 			},
 		},
 		{
@@ -150,6 +151,24 @@ func TestHandler_DeleteStream(t *testing.T) {
 				errMsg:  "stream not found",
 			},
 		},
+		{
+			name: "invalid epoch (less)",
+			args: args{streamID: 1, epoch: 0},
+			want: want{
+				wantErr: true,
+				errCode: rpcfb.ErrorCodeEXPIRED_STREAM_EPOCH,
+				errMsg:  "invalid stream epoch",
+			},
+		},
+		{
+			name: "invalid epoch (greater)",
+			args: args{streamID: 1, epoch: 2},
+			want: want{
+				wantErr: true,
+				errCode: rpcfb.ErrorCodeEXPIRED_STREAM_EPOCH,
+				errMsg:  "invalid stream epoch",
+			},
+		},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -166,10 +185,12 @@ func TestHandler_DeleteStream(t *testing.T) {
 			re.Equal([]int64{0, 1}, streamIDs)
 			// delete stream 0
 			preDeleteStream(t, h, 0)
+			updateStreamEpoch(t, h, 1, 1)
 
 			// create stream
 			req := &protocol.DeleteStreamRequest{DeleteStreamRequestT: rpcfb.DeleteStreamRequestT{
 				StreamId: tt.args.streamID,
+				Epoch:    tt.args.epoch,
 			}}
 			resp := &protocol.DeleteStreamResponse{}
 			h.DeleteStream(req, resp)
@@ -336,9 +357,21 @@ func TestHandler_UpdateStream(t *testing.T) {
 			},
 		},
 		{
-			name: "stream not found",
+			name: "stream not found (deleted)",
 			args: args{
 				stream: &rpcfb.StreamT{StreamId: 1, Replica: 3, AckCount: 3, StartOffset: -1},
+			},
+			want: want{
+				wantErr: true,
+				errCode: rpcfb.ErrorCodeNOT_FOUND,
+				errMsg:  "stream not found",
+				after:   rpcfb.StreamT{Replica: 3, AckCount: 3},
+			},
+		},
+		{
+			name: "stream not found (not exist)",
+			args: args{
+				stream: &rpcfb.StreamT{StreamId: 2, Replica: 3, AckCount: 3, StartOffset: -1},
 			},
 			want: want{
 				wantErr: true,
@@ -359,8 +392,9 @@ func TestHandler_UpdateStream(t *testing.T) {
 
 			// prepare
 			preHeartbeats(t, h, 0, 1, 2)
-			streamIDs := preCreateStreams(t, h, 3, 1)
-			re.Equal([]int64{0}, streamIDs)
+			streamIDs := preCreateStreams(t, h, 3, 2)
+			re.Equal([]int64{0, 1}, streamIDs)
+			preDeleteStream(t, h, 1)
 
 			// update stream
 			req := &protocol.UpdateStreamRequest{UpdateStreamRequestT: rpcfb.UpdateStreamRequestT{
@@ -428,9 +462,20 @@ func TestHandler_DescribeStream(t *testing.T) {
 			},
 		},
 		{
-			name: "stream not found",
+			name: "stream not found (deleted)",
 			args: args{
 				streamID: 1,
+			},
+			want: want{
+				wantErr: true,
+				errCode: rpcfb.ErrorCodeNOT_FOUND,
+				errMsg:  "stream not found",
+			},
+		},
+		{
+			name: "stream not found (not exist)",
+			args: args{
+				streamID: 2,
 			},
 			want: want{
 				wantErr: true,
@@ -450,8 +495,9 @@ func TestHandler_DescribeStream(t *testing.T) {
 
 			// prepare
 			preHeartbeats(t, h, 0, 1, 2)
-			streamIDs := preCreateStreams(t, h, 3, 1)
-			re.Equal([]int64{0}, streamIDs)
+			streamIDs := preCreateStreams(t, h, 3, 2)
+			re.Equal([]int64{0, 1}, streamIDs)
+			preDeleteStream(t, h, 1)
 
 			// create stream
 			req := &protocol.DescribeStreamRequest{DescribeStreamRequestT: rpcfb.DescribeStreamRequestT{
@@ -467,6 +513,214 @@ func TestHandler_DescribeStream(t *testing.T) {
 			} else {
 				re.Equal(rpcfb.ErrorCodeOK, resp.Status.Code)
 				re.Equal(tt.want.stream, *resp.Stream)
+			}
+		})
+	}
+}
+
+func TestHandler_TrimStream(t *testing.T) {
+	const (
+		_streamEpoch  = 16
+		_replica      = 3
+		_ack          = _replica
+		_streamOffset = 10
+	)
+
+	type args struct {
+		streamID int64
+		epoch    int64
+		offset   int64
+	}
+	type want struct {
+		s *rpcfb.StreamT
+		r *rpcfb.RangeT
+
+		wantErr bool
+		errCode rpcfb.ErrorCode
+		errMsg  string
+	}
+	tests := []struct {
+		name    string
+		prepare []preRange
+		args    args
+		want    want
+		// TODO check after trim
+	}{
+		{
+			name: "trim at a non-sealed range",
+			prepare: []preRange{
+				{0, 0, 42},
+				{1, 42, -1},
+			},
+			args: args{streamID: 0, epoch: _streamEpoch, offset: 84},
+			want: want{
+				s: &rpcfb.StreamT{StartOffset: 84},
+				r: &rpcfb.RangeT{Epoch: 2, Index: 1, Start: 84, End: -1},
+			},
+		},
+		{
+			name: "trim at the middle of a sealed range",
+			prepare: []preRange{
+				{0, 0, 42},
+				{1, 42, -1},
+			},
+			args: args{streamID: 0, epoch: _streamEpoch, offset: 21},
+			want: want{
+				s: &rpcfb.StreamT{StartOffset: 21},
+				r: &rpcfb.RangeT{Epoch: 1, Index: 0, Start: 21, End: 42},
+			},
+		},
+		{
+			name: "trim at the end of a sealed range",
+			prepare: []preRange{
+				{0, 0, 42},
+				{1, 42, -1},
+			},
+			args: args{streamID: 0, epoch: _streamEpoch, offset: 42},
+			want: want{
+				s: &rpcfb.StreamT{StartOffset: 42},
+				r: &rpcfb.RangeT{Epoch: 2, Index: 1, Start: 42, End: -1},
+			},
+		},
+		{
+			name: "trim at the end of a sealed range, and it's the last range",
+			prepare: []preRange{
+				{0, 0, 42},
+				{1, 42, 84},
+			},
+			args: args{streamID: 0, epoch: _streamEpoch, offset: 84},
+			want: want{
+				s: &rpcfb.StreamT{StartOffset: 84},
+				r: &rpcfb.RangeT{Epoch: 2, Index: 1, Start: 84, End: 84},
+			},
+		},
+		{
+			name: "stream not found (deleted)",
+			prepare: []preRange{
+				{0, 0, 42},
+				{1, 42, -1},
+			},
+			args: args{streamID: 1, epoch: _streamEpoch, offset: 84},
+			want: want{
+				wantErr: true,
+				errCode: rpcfb.ErrorCodeNOT_FOUND,
+				errMsg:  "stream not found",
+			},
+		},
+		{
+			name: "stream not found (not exist)",
+			prepare: []preRange{
+				{0, 0, 42},
+				{1, 42, -1},
+			},
+			args: args{streamID: 2, epoch: _streamEpoch, offset: 84},
+			want: want{
+				wantErr: true,
+				errCode: rpcfb.ErrorCodeNOT_FOUND,
+				errMsg:  "stream not found",
+			},
+		},
+		{
+			name: "invalid epoch (less)",
+			prepare: []preRange{
+				{0, 0, 42},
+				{1, 42, -1},
+			},
+			args: args{streamID: 0, epoch: _streamEpoch - 1, offset: 84},
+			want: want{
+				wantErr: true,
+				errCode: rpcfb.ErrorCodeEXPIRED_STREAM_EPOCH,
+				errMsg:  "invalid stream epoch",
+			},
+		},
+		{
+			name: "invalid epoch (greater)",
+			prepare: []preRange{
+				{0, 0, 42},
+				{1, 42, -1},
+			},
+			args: args{streamID: 0, epoch: _streamEpoch + 1, offset: 84},
+			want: want{
+				wantErr: true,
+				errCode: rpcfb.ErrorCodeEXPIRED_STREAM_EPOCH,
+				errMsg:  "invalid stream epoch",
+			},
+		},
+		{
+			name: "offset too small",
+			prepare: []preRange{
+				{0, 0, 42},
+				{1, 42, 84},
+			},
+			args: args{streamID: 0, epoch: _streamEpoch, offset: 5},
+			want: want{
+				wantErr: true,
+				errCode: rpcfb.ErrorCodeBAD_REQUEST,
+				errMsg:  "invalid stream offset",
+			},
+		},
+		{
+			name: "offset too large",
+			prepare: []preRange{
+				{0, 0, 42},
+				{1, 42, 84},
+			},
+			args: args{streamID: 0, epoch: _streamEpoch, offset: 168},
+			want: want{
+				wantErr: true,
+				errCode: rpcfb.ErrorCodeBAD_REQUEST,
+				errMsg:  "invalid offset",
+			},
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			re := require.New(t)
+
+			h, closeFunc := startSbpHandler(t, nil, true)
+			defer closeFunc()
+
+			// prepare
+			preHeartbeats(t, h, 0, 1, 2)
+			streamIDs := preCreateStreams(t, h, _replica, 2)
+			re.Equal([]int64{0, 1}, streamIDs)
+			preDeleteStream(t, h, 1)
+			prepareRanges(t, h, 0, tt.prepare)
+			trimStream(t, h, 0, _streamOffset)
+			updateStreamEpoch(t, h, 0, _streamEpoch)
+
+			// common want
+			if tt.want.s != nil {
+				tt.want.s.Epoch = _streamEpoch
+				tt.want.s.Replica = _replica
+				tt.want.s.AckCount = _ack
+			}
+			if tt.want.r != nil {
+				tt.want.r.ReplicaCount = _replica
+				tt.want.r.AckCount = _ack
+			}
+
+			// trim stream
+			req := &protocol.TrimStreamRequest{TrimStreamRequestT: rpcfb.TrimStreamRequestT{
+				StreamId:  tt.args.streamID,
+				Epoch:     tt.args.epoch,
+				MinOffset: tt.args.offset,
+			}}
+			resp := &protocol.TrimStreamResponse{}
+			h.TrimStream(req, resp)
+
+			// check response
+			if tt.want.wantErr {
+				re.Equal(tt.want.errCode, resp.Status.Code)
+				re.Contains(resp.Status.Message, tt.want.errMsg)
+			} else {
+				re.Equal(rpcfb.ErrorCodeOK, resp.Status.Code)
+				re.Equal(tt.want.s, resp.Stream)
+				fmtRangeServers(resp.Range)
+				fillRangeInfo(tt.want.r)
+				re.Equal(tt.want.r, resp.Range)
 			}
 		})
 	}
@@ -502,4 +756,19 @@ func updateStreamEpoch(tb testing.TB, h *Handler, streamID int64, epoch int64) {
 	h.UpdateStream(req, resp)
 	re.Equal(rpcfb.ErrorCodeOK, resp.Status.Code, resp.Status.Message)
 	re.Equal(epoch, resp.Stream.Epoch)
+}
+
+func trimStream(tb testing.TB, h *Handler, streamID int64, offset int64) {
+	re := require.New(tb)
+
+	s := getStream(tb, h, streamID)
+	req := &protocol.TrimStreamRequest{TrimStreamRequestT: rpcfb.TrimStreamRequestT{
+		StreamId:  streamID,
+		Epoch:     s.Epoch,
+		MinOffset: offset,
+	}}
+	resp := &protocol.TrimStreamResponse{}
+	h.TrimStream(req, resp)
+	re.Equal(rpcfb.ErrorCodeOK, resp.Status.Code, resp.Status.Message)
+	re.Equal(offset, resp.Stream.StartOffset)
 }

@@ -31,7 +31,7 @@ func (e *Endpoint) ListResource(ctx context.Context, rv int64, token ContinueTok
 	keyPrefix, err := keyPrefix(token.ResourceType)
 	if err != nil {
 		logger.Error("failed to get key prefix", zap.Error(err))
-		return nil, 0, ContinueToken{}, errors.Wrap(err, "get key prefix")
+		return nil, 0, ContinueToken{}, errors.WithMessage(err, "get key prefix")
 	}
 	keyRange := kv.Range{
 		StartKey: append(keyPrefix, token.StartKey...),
@@ -41,7 +41,7 @@ func (e *Endpoint) ListResource(ctx context.Context, rv int64, token ContinueTok
 	kvs, newRV, more, err := e.KV.GetByRange(ctx, keyRange, rv, int64(limit), false)
 	if err != nil {
 		logger.Error("failed to list resources", zap.Error(err))
-		return nil, 0, ContinueToken{}, errors.Wrap(err, "list resources")
+		return nil, 0, ContinueToken{}, errors.WithMessage(err, "list resources")
 	}
 
 	token.More = more
@@ -68,7 +68,7 @@ func (e *Endpoint) WatchResource(ctx context.Context, rv int64, types []rpcfb.Re
 		prefix, err := keyPrefix(resourceType)
 		if err != nil {
 			logger.Error("failed to get key prefix", zap.Error(err))
-			return nil, 0, errors.Wrap(err, "get key prefix")
+			return nil, 0, errors.WithMessage(err, "get key prefix")
 		}
 		prefixes[i] = prefix
 	}
@@ -89,17 +89,17 @@ func (e *Endpoint) WatchResource(ctx context.Context, rv int64, types []rpcfb.Re
 	case events := <-ch:
 		if err := events.Error; err != nil {
 			logger.Error("failed to watch resources", zap.Error(err))
-			return nil, 0, errors.Wrap(err, "watch resources")
+			return nil, 0, errors.WithMessage(err, "watch resources")
 		}
 		resourceEvents := make([]*rpcfb.ResourceEventT, len(events.Events))
 		for i, event := range events.Events {
 			switch event.Type {
 			case kv.Added:
-				resourceEvents[i] = &rpcfb.ResourceEventT{Type: rpcfb.EventTypeADDED}
+				resourceEvents[i] = &rpcfb.ResourceEventT{Type: rpcfb.EventTypeEVENT_ADDED}
 			case kv.Modified:
-				resourceEvents[i] = &rpcfb.ResourceEventT{Type: rpcfb.EventTypeMODIFIED}
+				resourceEvents[i] = &rpcfb.ResourceEventT{Type: rpcfb.EventTypeEVENT_MODIFIED}
 			case kv.Deleted:
-				resourceEvents[i] = &rpcfb.ResourceEventT{Type: rpcfb.EventTypeDELETED}
+				resourceEvents[i] = &rpcfb.ResourceEventT{Type: rpcfb.EventTypeEVENT_DELETED}
 			}
 			resourceType, err := resourceType(event.Key)
 			if err != nil {
@@ -117,44 +117,44 @@ func (e *Endpoint) WatchResource(ctx context.Context, rv int64, types []rpcfb.Re
 
 func keyPrefix(resourceType rpcfb.ResourceType) ([]byte, error) {
 	switch resourceType {
-	case rpcfb.ResourceTypeRANGE_SERVER:
+	case rpcfb.ResourceTypeRESOURCE_RANGE_SERVER:
 		return []byte(_rangeServerPrefix), nil
-	case rpcfb.ResourceTypeSTREAM:
+	case rpcfb.ResourceTypeRESOURCE_STREAM:
 		return []byte(_streamPrefix), nil
-	case rpcfb.ResourceTypeRANGE:
+	case rpcfb.ResourceTypeRESOURCE_RANGE:
 		return []byte(_rangePrefix), nil
-	case rpcfb.ResourceTypeOBJECT:
+	case rpcfb.ResourceTypeRESOURCE_OBJECT:
 		return []byte(_objectPrefix), nil
 	default:
-		return nil, errors.Wrapf(ErrUnsupportedResourceType, "unsupported resource type %v", resourceType)
+		return nil, errors.WithMessagef(ErrUnsupportedResourceType, "unsupported resource type %v", resourceType)
 	}
 }
 
 func resourceType(key []byte) (rpcfb.ResourceType, error) {
 	switch {
 	case bytes.HasPrefix(key, []byte(_rangeServerPrefix)):
-		return rpcfb.ResourceTypeRANGE_SERVER, nil
+		return rpcfb.ResourceTypeRESOURCE_RANGE_SERVER, nil
 	case bytes.HasPrefix(key, []byte(_streamPrefix)):
-		return rpcfb.ResourceTypeSTREAM, nil
+		return rpcfb.ResourceTypeRESOURCE_STREAM, nil
 	case bytes.HasPrefix(key, []byte(_rangePrefix)):
-		return rpcfb.ResourceTypeRANGE, nil
+		return rpcfb.ResourceTypeRESOURCE_RANGE, nil
 	case bytes.HasPrefix(key, []byte(_objectPrefix)):
-		return rpcfb.ResourceTypeOBJECT, nil
+		return rpcfb.ResourceTypeRESOURCE_OBJECT, nil
 	default:
-		return rpcfb.ResourceTypeUNKNOWN, errors.Errorf("unknown resource type for key %s", key)
+		return rpcfb.ResourceTypeRESOURCE_UNKNOWN, errors.Errorf("unknown resource type for key %s", key)
 	}
 }
 
 func newResource(typ rpcfb.ResourceType, data []byte) *rpcfb.ResourceT {
 	resource := &rpcfb.ResourceT{Type: typ}
 	switch typ {
-	case rpcfb.ResourceTypeRANGE_SERVER:
+	case rpcfb.ResourceTypeRESOURCE_RANGE_SERVER:
 		resource.RangeServer = rpcfb.GetRootAsRangeServer(data, 0).UnPack()
-	case rpcfb.ResourceTypeSTREAM:
+	case rpcfb.ResourceTypeRESOURCE_STREAM:
 		resource.Stream = rpcfb.GetRootAsStream(data, 0).UnPack()
-	case rpcfb.ResourceTypeRANGE:
+	case rpcfb.ResourceTypeRESOURCE_RANGE:
 		resource.Range = rpcfb.GetRootAsRange(data, 0).UnPack()
-	case rpcfb.ResourceTypeOBJECT:
+	case rpcfb.ResourceTypeRESOURCE_OBJECT:
 		resource.Object = rpcfb.GetRootAsObj(data, 0).UnPack()
 	}
 	return resource
