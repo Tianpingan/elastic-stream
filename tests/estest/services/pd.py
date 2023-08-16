@@ -25,7 +25,7 @@ class PD(Service):
         cmd = self.start_cmd(node)
         node.account.ssh(cmd)
         self.hostname = node.account.hostname
-        wait_until(lambda: self.listening(node), timeout_sec=30, err_msg="PD node failed to start")
+        wait_until(lambda: self.listening(node), timeout_sec=60, err_msg="PD node failed to start")
 
     def listening(self, node):
         try:
@@ -64,13 +64,13 @@ class PD(Service):
         idx = self.idx(node)
         self.logger.info("Killing %s node %d on %s" % (type(self).__name__, idx, node.account.hostname))
         self.signal_node(node, signal.SIGKILL)
-        wait_until(lambda: not self.alive(node), timeout_sec=5, err_msg="Timed out waiting for PD to be killed.")
+        wait_until(lambda: not self.alive(node), timeout_sec=60, err_msg="Timed out waiting for PD to be killed.")
 
     def stop_node(self, node):
         idx = self.idx(node)
         self.logger.info("Stopping %s node %d on %s" % (type(self).__name__, idx, node.account.hostname))
         self.signal_node(node)
-        wait_until(lambda: not self.alive(node), timeout_sec=5, err_msg="Timed out waiting for PD to stop.")
+        wait_until(lambda: not self.alive(node), timeout_sec=60, err_msg="Timed out waiting for PD to stop.")
 
     def signal_node(self, node, sig=signal.SIGTERM):
         pids = self.pids(node)

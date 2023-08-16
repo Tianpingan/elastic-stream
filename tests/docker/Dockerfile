@@ -67,6 +67,7 @@ RUN apt-get install -y wget telnet
 
 RUN wget -P /opt "https://github.com/AutoMQ/elastic-stream/releases/download/v0.2.8/pd_0.2.8_amd64.deb"
 RUN wget -P /opt "https://github.com/AutoMQ/elastic-stream/releases/download/v0.2.8/range-server_0.2.8_amd64.deb"
+RUN wget -P /opt "https://github.com/Tianpingan/elastic-stream/releases/download/e2e_tools/e2e_tools.jar"
 
 RUN dpkg --recursive --install /opt
 
