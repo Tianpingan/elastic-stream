@@ -1,6 +1,7 @@
 #![feature(btree_extract_if)]
 #![feature(btree_cursors)]
 #![feature(get_mut_unchecked)]
+#![feature(async_fn_in_trait)]
 
 pub mod error;
 pub mod request;

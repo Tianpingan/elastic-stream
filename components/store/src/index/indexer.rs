@@ -20,7 +20,9 @@ use tokio::sync::mpsc;
 
 use crate::error::StoreError;
 
-use super::{entry::IndexEntry, record_handle::RecordHandle, MinOffset};
+use super::{
+    entry::IndexEntry, record_handle::RecordHandle, record_key::RecordKey, Indexer, MinOffset,
+};
 
 const INDEX_COLUMN_FAMILY: &str = "index";
 const METADATA_COLUMN_FAMILY: &str = "metadata";
@@ -33,7 +35,7 @@ const WAL_CHECKPOINT: &str = "wal_checkpoint";
 /// If a range is sealed, its status is changed from `0` to `1` and logical `end` will be appended.
 const RANGE_PREFIX: u8 = b'r';
 
-pub(crate) struct Indexer {
+pub(crate) struct DefaultIndexer {
     /// RocksDB instance
     db: DB,
 
@@ -51,7 +53,7 @@ pub(crate) struct Indexer {
     flush_threshold: usize,
 }
 
-impl Indexer {
+impl DefaultIndexer {
     /// Build RocksDB column family options for index.
     ///
     fn build_index_column_family_options(
@@ -163,6 +165,138 @@ impl Indexer {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn scan_record_handles(
+        &self,
+        stream_id: u64,
+        range: u32,
+        offset: u64,
+        max_bytes: u32,
+    ) -> Result<Option<Vec<(RecordKey, RecordHandle)>>, StoreError> {
+        let mut read_opts = ReadOptions::default();
+        let lower = self.build_index_key(stream_id, range, offset);
+        read_opts.set_iterate_lower_bound(&lower[..]);
+
+        let mut upper = BytesMut::with_capacity(8 + 4);
+        upper.put_u64(stream_id);
+        upper.put_u32(range + 1);
+        read_opts.set_iterate_upper_bound(upper.freeze());
+
+        self.scan_record_handles_from(read_opts, max_bytes)
+    }
+
+    fn scan_record_handles_from(
+        &self,
+        read_opts: ReadOptions,
+        max_bytes: u32,
+    ) -> Result<Option<Vec<(RecordKey, RecordHandle)>>, StoreError> {
+        let mut bytes_c = 0_u32;
+        match self.db.cf_handle(INDEX_COLUMN_FAMILY) {
+            Some(cf) => {
+                let indexes: Vec<_> = self
+                    .db
+                    .iterator_cf_opt(cf, read_opts, IteratorMode::Start)
+                    .flatten()
+                    .filter(|(_k, v)| {
+                        if v.len() < 8 + 4 {
+                            warn!("Got an invalid index entry: len(value) = {}", v.len());
+                        }
+                        v.len() > 8 /* WAL offset */ + 4 /* length-type */
+                    })
+                    .map_while(|(k, v)| {
+                        if bytes_c >= max_bytes {
+                            return None;
+                        }
+                        let key = Into::<RecordKey>::into(&*k);
+                        let handle = Into::<RecordHandle>::into(&*v);
+                        bytes_c += handle.len;
+                        Some((key, handle))
+                    })
+                    .collect();
+
+                if indexes.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(indexes))
+                }
+            }
+            None => Err(StoreError::RocksDB(format!(
+                "No column family: `{}`",
+                INDEX_COLUMN_FAMILY
+            ))),
+        }
+    }
+
+    /// Compaction is synchronous and should execute in its own thread.
+    #[allow(dead_code)]
+    pub(crate) fn compact(&self) {
+        if let Some(cf) = self.db.cf_handle(INDEX_COLUMN_FAMILY) {
+            self.db.compact_range_cf(cf, None::<&[u8]>, None::<&[u8]>);
+        }
+    }
+
+    /// Returns the largest offset less than or equal to the given offset. The function follows the following rules:
+    /// 1. `None` is returned if the specific offset < min offset or offset > max offset.
+    /// 2. The current offset key is returned if it exists.
+    /// 3. Otherwise, the left key is returned.
+    fn retrieve_left_key(
+        &self,
+        stream_id: u64,
+        range: u32,
+        offset: u64,
+    ) -> Result<Option<IndexEntry>, StoreError> {
+        let max_key = self.retrieve_max_key(stream_id, range)?;
+        if let Some(entry) = max_key {
+            if offset > entry.offset {
+                return Ok(None);
+            }
+
+            if offset == entry.offset {
+                return Ok(Some(entry));
+            }
+        } else {
+            return Ok(None);
+        }
+
+        match self.db.cf_handle(INDEX_COLUMN_FAMILY) {
+            Some(cf) => {
+                let mut read_opts = ReadOptions::default();
+                // If the current offset has a key, return it.
+                // So we add 1 to the offset to achieve this behavior.
+                let upper = self.build_index_key(stream_id, range, offset + 1);
+                read_opts.set_iterate_upper_bound(&upper[..]);
+
+                let mut lower = BytesMut::with_capacity(8 + 4 + 8);
+                lower.put_u64(stream_id);
+                lower.put_u32(range);
+                lower.put_u64(0);
+                read_opts.set_iterate_lower_bound(lower.freeze());
+
+                // Reverse scan from the offset, find a lower key
+                let mut reverse_itr = self.db.iterator_cf_opt(cf, read_opts, IteratorMode::End);
+                let lower_entry = reverse_itr.next();
+                lower_entry
+                    .transpose()
+                    .map_err(|e| StoreError::RocksDB(e.into_string()))
+                    .map(|opt| opt.map(|(k, v)| IndexEntry::new(&k, &v)))
+            }
+            None => Err(StoreError::RocksDB(format!(
+                "No column family: `{}`",
+                INDEX_COLUMN_FAMILY
+            ))),
+        }
+    }
+
+    fn build_index_key(&self, stream_id: u64, range: u32, offset: u64) -> Bytes {
+        let mut index_key = BytesMut::with_capacity(8 + 4 + 8);
+        index_key.put_u64(stream_id);
+        index_key.put_u32(range);
+        index_key.put_u64(offset);
+        index_key.freeze()
+    }
+}
+
+impl Indexer for DefaultIndexer {
     ///
     /// # Arguments
     ///
@@ -171,9 +305,9 @@ impl Indexer {
     /// * `offset` Logical offset within the stream, similar to row-id within a database table.
     /// * `handle` - Pointer to record-batch in WAL.
     ///
-    pub(crate) fn index(
+    fn index(
         &self,
-        stream_id: i64,
+        stream_id: u64,
         range: u32,
         offset: u64,
         handle: &RecordHandle,
@@ -181,7 +315,7 @@ impl Indexer {
         match self.db.cf_handle(INDEX_COLUMN_FAMILY) {
             Some(cf) => {
                 let mut key_buf = BytesMut::with_capacity(20);
-                key_buf.put_i64(stream_id);
+                key_buf.put_u64(stream_id);
                 key_buf.put_u32(range);
                 key_buf.put_u64(offset);
 
@@ -206,14 +340,14 @@ impl Indexer {
     /// The specific offset is not guaranteed to exist,
     /// because it may have been compacted or point to a intermediate position of a record batch.
     /// So the `scan_record_handles_left_shift` will left-shift the offset as a lower bound to scan the records
-    pub(crate) fn scan_record_handles_left_shift(
+    fn scan_record_handles_left_shift(
         &self,
-        stream_id: i64,
+        stream_id: u64,
         range: u32,
         offset: u64,
         max_offset: u64,
         max_bytes: u32,
-    ) -> Result<Option<Vec<RecordHandle>>, StoreError> {
+    ) -> Result<Option<Vec<(RecordKey, RecordHandle)>>, StoreError> {
         let left_key_entry = self.retrieve_left_key(stream_id, range, offset)?;
         let left_key = left_key_entry
             .map(|entry| entry.key())
@@ -228,71 +362,10 @@ impl Indexer {
         self.scan_record_handles_from(read_opts, max_bytes)
     }
 
-    #[cfg(test)]
-    pub(crate) fn scan_record_handles(
-        &self,
-        stream_id: i64,
-        range: u32,
-        offset: u64,
-        max_bytes: u32,
-    ) -> Result<Option<Vec<RecordHandle>>, StoreError> {
-        let mut read_opts = ReadOptions::default();
-        let lower = self.build_index_key(stream_id, range, offset);
-        read_opts.set_iterate_lower_bound(&lower[..]);
-
-        let mut upper = BytesMut::with_capacity(8 + 4);
-        upper.put_i64(stream_id);
-        upper.put_u32(range + 1);
-        read_opts.set_iterate_upper_bound(upper.freeze());
-
-        self.scan_record_handles_from(read_opts, max_bytes)
-    }
-
-    fn scan_record_handles_from(
-        &self,
-        read_opts: ReadOptions,
-        max_bytes: u32,
-    ) -> Result<Option<Vec<RecordHandle>>, StoreError> {
-        let mut bytes_c = 0_u32;
-        match self.db.cf_handle(INDEX_COLUMN_FAMILY) {
-            Some(cf) => {
-                let record_handles: Vec<_> = self
-                    .db
-                    .iterator_cf_opt(cf, read_opts, IteratorMode::Start)
-                    .flatten()
-                    .filter(|(_k, v)| {
-                        if v.len() < 8 + 4 {
-                            warn!("Got an invalid index entry: len(value) = {}", v.len());
-                        }
-                        v.len() > 8 /* WAL offset */ + 4 /* length-type */
-                    })
-                    .map_while(|(_k, v)| {
-                        if bytes_c >= max_bytes {
-                            return None;
-                        }
-                        let handle = Into::<RecordHandle>::into(&*v);
-                        bytes_c += handle.len;
-                        Some(handle)
-                    })
-                    .collect();
-
-                if record_handles.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(record_handles))
-                }
-            }
-            None => Err(StoreError::RocksDB(format!(
-                "No column family: `{}`",
-                INDEX_COLUMN_FAMILY
-            ))),
-        }
-    }
-
     /// Returns WAL checkpoint offset.
     ///
     /// Note we can call this method as frequently as we need as all operation is memory
-    pub(crate) fn get_wal_checkpoint(&self) -> Result<u64, StoreError> {
+    fn get_wal_checkpoint(&self) -> Result<u64, StoreError> {
         if let Some(metadata_cf) = self.db.cf_handle(METADATA_COLUMN_FAMILY) {
             match self
                 .db
@@ -324,7 +397,7 @@ impl Indexer {
     ///
     /// Note the indexes are possibly stored only in RocksDB memtable. Updated checkpoint WAL is the same.
     /// We are employing `Atomic Flush` of RocksDB to ensure data consistency without using WAL.
-    pub(crate) fn advance_wal_checkpoint(&self, offset: u64) -> Result<(), StoreError> {
+    fn advance_wal_checkpoint(&self, offset: u64) -> Result<(), StoreError> {
         let cf = self
             .db
             .cf_handle(METADATA_COLUMN_FAMILY)
@@ -350,7 +423,7 @@ impl Indexer {
     ///
     /// To minimize the amount of WAL data to recover, for example, in case of planned reboot, we shall update checkpoint
     /// offset and invoke this method before stopping.
-    pub(crate) fn flush(&self, wait: bool) -> Result<(), StoreError> {
+    fn flush(&self, wait: bool) -> Result<(), StoreError> {
         info!("AtomicFlush RocksDB column families");
         let mut flush_opt = FlushOptions::default();
         flush_opt.set_wait(wait);
@@ -367,29 +440,21 @@ impl Indexer {
         }
     }
 
-    /// Compaction is synchronous and should execute in its own thread.
-    #[allow(dead_code)]
-    pub(crate) fn compact(&self) {
-        if let Some(cf) = self.db.cf_handle(INDEX_COLUMN_FAMILY) {
-            self.db.compact_range_cf(cf, None::<&[u8]>, None::<&[u8]>);
-        }
-    }
-
-    pub(crate) fn retrieve_max_key(
+    fn retrieve_max_key(
         &self,
-        stream_id: i64,
+        stream_id: u64,
         range: u32,
     ) -> Result<Option<IndexEntry>, StoreError> {
         match self.db.cf_handle(INDEX_COLUMN_FAMILY) {
             Some(cf) => {
                 let mut read_opts = ReadOptions::default();
                 let mut lower = BytesMut::with_capacity(12);
-                lower.put_i64(stream_id);
+                lower.put_u64(stream_id);
                 lower.put_u32(range);
                 read_opts.set_iterate_lower_bound(lower.freeze());
 
                 let mut upper = BytesMut::with_capacity(12);
-                upper.put_i64(stream_id);
+                upper.put_u64(stream_id);
                 upper.put_u32(range + 1);
                 read_opts.set_iterate_upper_bound(upper.freeze());
 
@@ -405,73 +470,13 @@ impl Indexer {
             ))),
         }
     }
-
-    /// Returns the largest offset less than or equal to the given offset. The function follows the following rules:
-    /// 1. `None` is returned if the specific offset < min offset or offset > max offset.
-    /// 2. The current offset key is returned if it exists.
-    /// 3. Otherwise, the left key is returned.
-    fn retrieve_left_key(
-        &self,
-        stream_id: i64,
-        range: u32,
-        offset: u64,
-    ) -> Result<Option<IndexEntry>, StoreError> {
-        let max_key = self.retrieve_max_key(stream_id, range)?;
-        if let Some(entry) = max_key {
-            if offset > entry.offset {
-                return Ok(None);
-            }
-
-            if offset == entry.offset {
-                return Ok(Some(entry));
-            }
-        } else {
-            return Ok(None);
-        }
-
-        match self.db.cf_handle(INDEX_COLUMN_FAMILY) {
-            Some(cf) => {
-                let mut read_opts = ReadOptions::default();
-                // If the current offset has a key, return it.
-                // So we add 1 to the offset to achieve this behavior.
-                let upper = self.build_index_key(stream_id, range, offset + 1);
-                read_opts.set_iterate_upper_bound(&upper[..]);
-
-                let mut lower = BytesMut::with_capacity(8 + 4 + 8);
-                lower.put_i64(stream_id);
-                lower.put_u32(range);
-                lower.put_u64(0);
-                read_opts.set_iterate_lower_bound(lower.freeze());
-
-                // Reverse scan from the offset, find a lower key
-                let mut reverse_itr = self.db.iterator_cf_opt(cf, read_opts, IteratorMode::End);
-                let lower_entry = reverse_itr.next();
-                lower_entry
-                    .transpose()
-                    .map_err(|e| StoreError::RocksDB(e.into_string()))
-                    .map(|opt| opt.map(|(k, v)| IndexEntry::new(&k, &v)))
-            }
-            None => Err(StoreError::RocksDB(format!(
-                "No column family: `{}`",
-                INDEX_COLUMN_FAMILY
-            ))),
-        }
-    }
-
-    fn build_index_key(&self, stream_id: i64, range: u32, offset: u64) -> Bytes {
-        let mut index_key = BytesMut::with_capacity(8 + 4 + 8);
-        index_key.put_i64(stream_id);
-        index_key.put_u32(range);
-        index_key.put_u64(offset);
-        index_key.freeze()
-    }
 }
 
-impl super::LocalRangeManager for Indexer {
-    fn list_by_stream(&self, stream_id: i64, tx: mpsc::UnboundedSender<RangeMetadata>) {
+impl super::LocalRangeManager for DefaultIndexer {
+    fn list_by_stream(&self, stream_id: u64, tx: mpsc::UnboundedSender<RangeMetadata>) {
         let mut prefix = BytesMut::with_capacity(9);
         prefix.put_u8(RANGE_PREFIX);
-        prefix.put_i64(stream_id);
+        prefix.put_u64(stream_id);
 
         if let Some(cf) = self.db.cf_handle(METADATA_COLUMN_FAMILY) {
             let mut read_opts = ReadOptions::default();
@@ -491,7 +496,7 @@ impl super::LocalRangeManager for Indexer {
                         let _prefix = key_reader.get_u8();
                         debug_assert_eq!(_prefix, RANGE_PREFIX);
 
-                        let _stream_id = key_reader.get_i64();
+                        let _stream_id = key_reader.get_u64();
                         debug_assert_eq!(stream_id, _stream_id);
 
                         let id = key_reader.get_i32();
@@ -543,7 +548,7 @@ impl super::LocalRangeManager for Indexer {
                         let _prefix = key_reader.get_u8();
                         debug_assert_eq!(_prefix, RANGE_PREFIX);
 
-                        let _stream_id = key_reader.get_i64();
+                        let _stream_id = key_reader.get_u64();
 
                         let id = key_reader.get_i32();
 
@@ -568,14 +573,17 @@ impl super::LocalRangeManager for Indexer {
         }
     }
 
-    fn seal(&self, stream_id: i64, range: &RangeMetadata) -> Result<(), StoreError> {
-        debug_assert!(range.is_sealed(), "Range is not sealed yet");
+    fn seal(&self, stream_id: u64, range: &RangeMetadata) -> Result<(), StoreError> {
+        debug_assert!(
+            range.has_end(),
+            "The metadata to seal range does not have end offset"
+        );
         let end = range.end().ok_or(StoreError::Internal("".to_owned()))?;
         debug_assert!(end >= range.start(), "End of range cannot less than start");
         // prefix + stream-id + range-index
         let mut key_buf = BytesMut::with_capacity(1 + 8 + 4);
         key_buf.put_u8(RANGE_PREFIX);
-        key_buf.put_i64(stream_id);
+        key_buf.put_u64(stream_id);
         key_buf.put_i32(range.index());
 
         // start, [end] offset.
@@ -595,10 +603,10 @@ impl super::LocalRangeManager for Indexer {
         }
     }
 
-    fn add(&self, stream_id: i64, range: &RangeMetadata) -> Result<(), StoreError> {
+    fn add(&self, stream_id: u64, range: &RangeMetadata) -> Result<(), StoreError> {
         let mut key_buf = BytesMut::with_capacity(1 + 8 + 4);
         key_buf.put_u8(RANGE_PREFIX);
-        key_buf.put_i64(stream_id);
+        key_buf.put_u64(stream_id);
         key_buf.put_i32(range.index());
 
         let mut value_buf = BytesMut::with_capacity(8 + 8);
@@ -632,7 +640,7 @@ mod tests {
 
     use crate::index::{
         record_handle::{HandleExt, RecordHandle},
-        MinOffset,
+        Indexer, MinOffset,
     };
 
     struct SampleMinOffset {
@@ -651,7 +659,7 @@ mod tests {
         }
     }
 
-    fn new_indexer() -> Result<super::Indexer, Box<dyn Error>> {
+    fn new_indexer() -> Result<super::DefaultIndexer, Box<dyn Error>> {
         let path = tempfile::tempdir()?;
         let mut config = config::Configuration::default();
         config
@@ -662,7 +670,7 @@ mod tests {
         let min_offset = Arc::new(SampleMinOffset {
             min: AtomicU64::new(0),
         });
-        let indexer = super::Indexer::new(&config, min_offset as Arc<dyn MinOffset>, 128)?;
+        let indexer = super::DefaultIndexer::new(&config, min_offset as Arc<dyn MinOffset>, 128)?;
         Ok(indexer)
     }
 
@@ -696,7 +704,7 @@ mod tests {
         let max_key = indexer.retrieve_max_key(stream_id, range).unwrap().unwrap();
         assert_eq!(
             (stream_id, range, start_offset + 1),
-            (max_key.stream_id as i64, max_key.range, max_key.offset)
+            (max_key.stream_id, max_key.range, max_key.offset)
         );
 
         //Case two: no max key
@@ -729,7 +737,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             (stream_id, range, left_offset),
-            (left_key.stream_id as i64, left_key.range, left_key.offset)
+            (left_key.stream_id, left_key.range, left_key.offset)
         );
 
         // Case two: the specific key is equal to the left key
@@ -739,7 +747,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             (stream_id, range, left_offset + 2),
-            (left_key.stream_id as i64, left_key.range, left_key.offset)
+            (left_key.stream_id, left_key.range, left_key.offset)
         );
 
         // Case three: no left key
@@ -755,7 +763,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             (stream_id, range, left_offset),
-            (left_key.stream_id as i64, left_key.range, left_key.offset)
+            (left_key.stream_id, left_key.range, left_key.offset)
         );
 
         // Case five: the biggest key
@@ -766,7 +774,7 @@ mod tests {
 
         assert_eq!(
             (stream_id, range, left_offset + 4),
-            (left_key.stream_id as i64, left_key.range, left_key.offset)
+            (left_key.stream_id, left_key.range, left_key.offset)
         );
 
         // Case six: the biggest key + 1
@@ -785,8 +793,7 @@ mod tests {
         let range = 0;
         const CNT: u64 = 1024;
         (1..CNT)
-            .into_iter()
-            .map(|n| {
+            .flat_map(|n| {
                 let ptr = RecordHandle {
                     wal_offset: n * 128,
                     len: 128,
@@ -794,62 +801,70 @@ mod tests {
                 };
                 indexer.index(0, range, n * 10, &ptr)
             })
-            .flatten()
             .count();
 
         // The record handle physical offset is 128, 256, 384, ...
         // While the logical offset is 10, 20, 30, ..., which means each record batch contains 10 records.
 
         // Case one: scan from a exist key
-        let handles = indexer.scan_record_handles_left_shift(0, range, 10, 100, 128 * 2)?;
-        assert_eq!(true, handles.is_some());
-        let handles = handles.unwrap();
-        assert_eq!(2, handles.len());
+        let indexes = indexer.scan_record_handles_left_shift(0, range, 10, 100, 128 * 2)?;
+        assert!(indexes.is_some());
+        let indexes = indexes.unwrap();
+        assert_eq!(2, indexes.len());
 
-        handles.into_iter().enumerate().for_each(|(i, handle)| {
-            assert_eq!(((i + 1) * 128) as u64, handle.wal_offset);
-            assert_eq!(128, handle.len);
-            assert_eq!(HandleExt::Hash(10), handle.ext);
-        });
+        indexes
+            .into_iter()
+            .enumerate()
+            .for_each(|(i, (_, handle))| {
+                assert_eq!(((i + 1) * 128) as u64, handle.wal_offset);
+                assert_eq!(128, handle.len);
+                assert_eq!(HandleExt::Hash(10), handle.ext);
+            });
 
         // Case two: scan from a left key
-        let handles = indexer.scan_record_handles_left_shift(0, range, 12, 100, 128 * 2)?;
-        assert_eq!(true, handles.is_some());
-        let handles = handles.unwrap();
+        let indexes = indexer.scan_record_handles_left_shift(0, range, 12, 100, 128 * 2)?;
+        assert!(indexes.is_some());
+        let handles = indexes.unwrap();
         assert_eq!(2, handles.len());
 
-        handles.into_iter().enumerate().for_each(|(i, handle)| {
-            assert_eq!(((i + 1) * 128) as u64, handle.wal_offset);
-            assert_eq!(128, handle.len);
-            assert_eq!(HandleExt::Hash(10), handle.ext);
-        });
+        handles
+            .into_iter()
+            .enumerate()
+            .for_each(|(i, (_, handle))| {
+                assert_eq!(((i + 1) * 128) as u64, handle.wal_offset);
+                assert_eq!(128, handle.len);
+                assert_eq!(HandleExt::Hash(10), handle.ext);
+            });
 
         // Case three: scan from a key smaller than the smallest key
-        let handles = indexer.scan_record_handles_left_shift(0, range, 1, 100, 128 * 2)?;
-        assert_eq!(true, handles.is_some());
-        let handles = handles.unwrap();
-        assert_eq!(2, handles.len());
+        let indexes = indexer.scan_record_handles_left_shift(0, range, 1, 100, 128 * 2)?;
+        assert!(indexes.is_some());
+        let indexes = indexes.unwrap();
+        assert_eq!(2, indexes.len());
 
-        handles.into_iter().enumerate().for_each(|(i, handle)| {
-            assert_eq!(((i + 1) * 128) as u64, handle.wal_offset);
-            assert_eq!(128, handle.len);
-            assert_eq!(HandleExt::Hash(10), handle.ext);
-        });
+        indexes
+            .into_iter()
+            .enumerate()
+            .for_each(|(i, (_, handle))| {
+                assert_eq!(((i + 1) * 128) as u64, handle.wal_offset);
+                assert_eq!(128, handle.len);
+                assert_eq!(HandleExt::Hash(10), handle.ext);
+            });
 
         // Case four: scan from a key bigger than the biggest key
 
-        let handles = indexer.scan_record_handles_left_shift(0, range, CNT * 11, 100, 128 * 2)?;
-        assert_eq!(true, handles.is_none());
+        let indexes = indexer.scan_record_handles_left_shift(0, range, CNT * 11, 100, 128 * 2)?;
+        assert!(indexes.is_none());
 
         // Case five: scan with a max offset
-        let handles = indexer.scan_record_handles_left_shift(0, range, 10, 40, 128 * 10)?;
+        let indexes = indexer.scan_record_handles_left_shift(0, range, 10, 40, 128 * 10)?;
         // Three records are scanned
-        assert_eq!(true, handles.is_some());
-        let handles = handles.unwrap();
-        assert_eq!(3, handles.len());
-        assert_eq!(handles[0].wal_offset, 128);
-        assert_eq!(handles[1].wal_offset, 256);
-        assert_eq!(handles[2].wal_offset, 384);
+        assert!(indexes.is_some());
+        let indexes = indexes.unwrap();
+        assert_eq!(3, indexes.len());
+        assert_eq!(indexes[0].1.wal_offset, 128);
+        assert_eq!(indexes[1].1.wal_offset, 256);
+        assert_eq!(indexes[2].1.wal_offset, 384);
 
         Ok(())
     }
@@ -860,8 +875,7 @@ mod tests {
         let range = 0;
         const CNT: u64 = 1024;
         (0..CNT)
-            .into_iter()
-            .map(|n| {
+            .flat_map(|n| {
                 let ptr = RecordHandle {
                     wal_offset: n,
                     len: 128,
@@ -869,29 +883,31 @@ mod tests {
                 };
                 indexer.index(0, range, n, &ptr)
             })
-            .flatten()
             .count();
 
         // Case one: scan ten records from the indexer
-        let handles = indexer.scan_record_handles(0, range, 0, 10 * 128)?;
-        assert_eq!(true, handles.is_some());
-        let handles = handles.unwrap();
-        assert_eq!(10, handles.len());
-        handles.into_iter().enumerate().for_each(|(i, handle)| {
-            assert_eq!(i as u64, handle.wal_offset);
-            assert_eq!(128, handle.len);
-            assert_eq!(HandleExt::Hash(10), handle.ext);
-        });
+        let indexes = indexer.scan_record_handles(0, range, 0, 10 * 128)?;
+        assert!(indexes.is_some());
+        let indexes = indexes.unwrap();
+        assert_eq!(10, indexes.len());
+        indexes
+            .into_iter()
+            .enumerate()
+            .for_each(|(i, (_, handle))| {
+                assert_eq!(i as u64, handle.wal_offset);
+                assert_eq!(128, handle.len);
+                assert_eq!(HandleExt::Hash(10), handle.ext);
+            });
 
         // Case two: scan 0 bytes from the indexer
-        let handles = indexer.scan_record_handles(0, range, 0, 0)?;
-        assert_eq!(true, handles.is_none());
+        let indexes = indexer.scan_record_handles(0, range, 0, 0)?;
+        assert!(indexes.is_none());
 
         // Case three: return at least one record even if the bytes is not enough
-        let handles = indexer.scan_record_handles(0, range, 0, 5)?;
-        assert_eq!(true, handles.is_some());
-        let handles = handles.unwrap();
-        assert_eq!(1, handles.len());
+        let indexes = indexer.scan_record_handles(0, range, 0, 5)?;
+        assert!(indexes.is_some());
+        let indexes = indexes.unwrap();
+        assert_eq!(1, indexes.len());
 
         Ok(())
     }
@@ -908,13 +924,15 @@ mod tests {
         let min_offset = Arc::new(SampleMinOffset {
             min: AtomicU64::new(0),
         });
-        let indexer =
-            super::Indexer::new(&config, Arc::clone(&min_offset) as Arc<dyn MinOffset>, 128)?;
+        let indexer = super::DefaultIndexer::new(
+            &config,
+            Arc::clone(&min_offset) as Arc<dyn MinOffset>,
+            128,
+        )?;
         let range = 0;
         const CNT: u64 = 1024;
         (0..CNT)
-            .into_iter()
-            .map(|n| {
+            .flat_map(|n| {
                 let ptr = RecordHandle {
                     wal_offset: n,
                     len: 128,
@@ -922,18 +940,17 @@ mod tests {
                 };
                 indexer.index(0, range, n, &ptr)
             })
-            .flatten()
             .count();
 
         indexer.flush(true)?;
         indexer.compact();
 
-        let handles = indexer.scan_record_handles(0, range, 0, 10)?.unwrap();
-        assert_eq!(0, handles[0].wal_offset);
+        let indexes = indexer.scan_record_handles(0, range, 0, 10)?.unwrap();
+        assert_eq!(0, indexes[0].1.wal_offset);
         min_offset.set_min(10);
 
         indexer.compact();
-        let _handles = indexer.scan_record_handles(0, range, 0, 10)?.unwrap();
+        let _indexes = indexer.scan_record_handles(0, range, 0, 10)?.unwrap();
         Ok(())
     }
 }

@@ -2,6 +2,7 @@ use std::{
     cmp,
     collections::{HashMap, VecDeque},
     io,
+    iter::successors,
     sync::Arc,
 };
 
@@ -15,7 +16,6 @@ use crate::{
     io::segment::{LogSegment, Medium, SegmentDescriptor, Status},
 };
 
-use bytes::BufMut;
 use io_uring::{opcode, squeue, types};
 use log::{debug, error, info, trace, warn};
 use model::payload::Payload;
@@ -32,10 +32,7 @@ pub(crate) struct WalCache {
     current_cache_size: u64,
 
     /// When the cache size is greater than the high water mark, a reclaim operation will be triggered.
-    high_water_mark: usize,
-
-    /// Each reclaim operation will try to reclaim the cache size to the low water mark.
-    low_water_mark: usize,
+    high_watermark: usize,
 }
 
 /// A WAL contains a list of log segments, and supports open, close, alloc, and other operations.
@@ -76,9 +73,7 @@ impl Wal {
             wal_cache: WalCache {
                 max_cache_size: config.store.max_cache_size,
                 current_cache_size: 0,
-                // TODO: make these configurable
-                high_water_mark: 80,
-                low_water_mark: 60,
+                high_watermark: config.store.cache_high_watermark,
             },
         }
     }
@@ -205,11 +200,7 @@ impl Wal {
             buf.resize(len, 0);
             segment.read_exact_at(buf.as_mut(), file_pos)?;
 
-            let ckm = util::crc32::crc32(buf.as_ref());
-            let mut total_ckm = bytes::BytesMut::with_capacity(4 + 8);
-            total_ckm.put_u32(ckm);
-            total_ckm.put_u64(segment.wal_offset);
-            let ckm = util::crc32::crc32(total_ckm);
+            let ckm = LogSegment::checksum_record([&buf], segment.wal_offset);
 
             if ckm != crc {
                 file_pos -= 8;
@@ -247,7 +238,7 @@ impl Wal {
             // Index the record batch
             match Payload::parse_append_entry(&buf) {
                 Ok((Some(entry), len)) => {
-                    let stream_id = entry.stream_id as i64;
+                    let stream_id = entry.stream_id;
                     let range = entry.index;
                     let offset = entry.offset.expect("base-offset should have been assigned");
                     let handle = RecordHandle {
@@ -282,6 +273,18 @@ impl Wal {
         indexer: Arc<IndexDriver>,
     ) -> Result<u64, StoreError> {
         let mut pos = offset;
+
+        // Scan, at most, from the first segment
+        if let Some(segment) = self.segments.front() {
+            if pos < segment.wal_offset {
+                warn!(
+                    "WAL checkpoint {pos} is less than beginning WAL offset of the first segment file: {}",
+                    segment.wal_offset
+                );
+                pos = segment.wal_offset;
+            }
+        }
+
         info!("Start to recover WAL segment files from {pos}");
         let mut need_scan = true;
         for segment in self.segments.iter_mut() {
@@ -309,56 +312,101 @@ impl Wal {
         Ok(pos)
     }
 
+    /// Queue and submit a single SQE to the SQ of control io-uring.
+    #[inline]
+    fn enqueue_and_submit_entry(
+        &mut self,
+        entry: &squeue::Entry,
+        entry_name: &str,
+    ) -> Result<(), StoreError> {
+        unsafe {
+            self.control_ring.submission().push(entry).map_err(|e| {
+                error!("Failed to push {} SQE to SQ: {}", entry_name, e.to_string());
+                StoreError::IoUring
+            })
+        }?;
+        let _ = self.control_ring.submit().map_err(|e| {
+            error!(
+                "Failed to submit {} SQE to SQ: {}",
+                entry_name,
+                e.to_string()
+            );
+            StoreError::IoUring
+        })?;
+        Ok(())
+    }
+
+    /// Enqueue and submit multiple SQEs to the SQ of control io-uring.
+    #[inline]
+    fn enqueue_and_submit_entries(&mut self, entries: &[squeue::Entry]) -> Result<(), StoreError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        unsafe {
+            self.control_ring
+                .submission()
+                .push_multiple(entries)
+                .map_err(|e| {
+                    error!(
+                        "Failed to push multiple submission queue entries: {}",
+                        e.to_string()
+                    );
+                    StoreError::IoUring
+                })
+        }?;
+        let _ = self.control_ring.submit().map_err(|e| {
+            error!(
+                "Failed to submit multiple submission queue entries: {}",
+                e.to_string()
+            );
+            StoreError::IoUring
+        })?;
+        Ok(())
+    }
+
     /// New a segment, and then open it in the uring driver.
     pub(crate) fn try_open_segment(&mut self) -> Result<(), StoreError> {
         let mut segment = self.alloc_segment()?;
         let offset = segment.wal_offset;
         debug_assert_eq!(segment.status, Status::OpenAt);
         info!("About to create/open LogSegmentFile: `{}`", segment);
-        let exist_recycled_segment_file = self
+        let has_recyclable_segment = self
             .segments
             .front()
             .filter(|segment| segment.status == Status::Recycled)
             .is_some();
 
-        if self.config.store.reclaim_policy.is_recycle() && exist_recycled_segment_file {
+        if self.config.store.reclaim_policy.is_recycle() && has_recyclable_segment {
             // Since there exists a recycled segment file, we can reuse it by renaming it.
-            segment.status = Status::RenameAt;
-
             let recycled_segment = self.segments.pop_front().unwrap();
-            let old_segment_path = recycled_segment.path.clone();
-
-            self.inflight_control_tasks.insert(offset, Status::RenameAt);
+            segment.status = Status::RenameAt(recycled_segment.path.clone());
+            let old_path = if let Status::RenameAt(ref s) = segment.status {
+                s.as_ptr()
+            } else {
+                unreachable!()
+            };
+            self.inflight_control_tasks
+                .insert(offset, segment.status.clone());
             let sqe = opcode::RenameAt::new(
                 types::Fd(libc::AT_FDCWD),
-                old_segment_path.into_raw(),
+                old_path,
                 types::Fd(libc::AT_FDCWD),
                 segment.path.as_ptr(),
             )
             .build()
             .user_data(offset);
-            unsafe {
-                self.control_ring.submission().push(&sqe).map_err(|e| {
-                    error!("Failed to push RenameAt SQE to submission queue: {:?}", e);
-                    StoreError::IoUring
-                })?
-            };
+            self.enqueue_and_submit_entry(&sqe, "RenameAt")?;
             self.segments.push_back(segment);
             Ok(())
         } else {
-            let status = segment.status;
+            let status = segment.status.clone();
             self.inflight_control_tasks.insert(offset, status);
             let sqe = opcode::OpenAt::new(types::Fd(libc::AT_FDCWD), segment.path.as_ptr())
                 .flags(libc::O_CREAT | libc::O_RDWR | libc::O_DIRECT)
                 .mode(libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IWGRP)
                 .build()
                 .user_data(offset);
-            unsafe {
-                self.control_ring.submission().push(&sqe).map_err(|e| {
-                    error!("Failed to push OpenAt SQE to submission queue: {:?}", e);
-                    StoreError::IoUring
-                })?
-            };
+            self.enqueue_and_submit_entry(&sqe, "OpenAt")?;
             self.segments.push_back(segment);
             Ok(())
         }
@@ -395,28 +443,21 @@ impl Wal {
             })
             .collect();
 
+        let mut entries = vec![];
+
         for segment in to_close {
             self.inflight_control_tasks
-                .insert(segment.wal_offset, segment.status);
+                .insert(segment.wal_offset, segment.status.clone());
             if let Some(sd) = segment.sd.as_ref() {
                 let sqe = opcode::Close::new(types::Fd(sd.fd))
                     .build()
                     .user_data(segment.wal_offset);
                 info!("About to close LogSegmentFile: {}", segment);
-                unsafe {
-                    self.control_ring.submission().push(&sqe).map_err(|e| {
-                        error!("Failed to submit close SQE to SQ: {:?}", e);
-                        StoreError::IoUring
-                    })
-                }?;
+                entries.push(sqe);
             }
         }
 
-        self.control_ring.submit().map_err(|e| {
-            error!("io_uring_enter failed when submit: {:?}", e);
-            StoreError::IoUring
-        })?;
-
+        self.enqueue_and_submit_entries(&entries)?;
         Ok(())
     }
 
@@ -437,6 +478,7 @@ impl Wal {
     ///
     /// # Returns
     /// The reclaimed bytes and the current cache size.
+    #[minitrace::trace]
     pub(crate) fn try_reclaim(&mut self, min_free_bytes: u32) -> (u64, u64) {
         // Calculate the current cache size of all the segments.
         let mut cache_size = 0u64;
@@ -444,12 +486,11 @@ impl Wal {
             cache_size += segment.block_cache.cache_size() as u64;
         }
 
-        // Calculate the bytes to reclaim, based on the configured `high_water_mark` and `low_water_mark`.
-        let high_percent = Percentage::from(self.wal_cache.high_water_mark);
-        let low_percent = Percentage::from(self.wal_cache.low_water_mark);
+        // Calculate the bytes to reclaim, based on the configured `high_watermark`.
+        let high_percent = Percentage::from(self.wal_cache.high_watermark);
         let mut to_reclaim = 0;
         if cache_size > high_percent.apply_to(self.wal_cache.max_cache_size) {
-            to_reclaim = cache_size - low_percent.apply_to(self.wal_cache.max_cache_size);
+            to_reclaim = cache_size - high_percent.apply_to(self.wal_cache.max_cache_size);
         }
 
         // If the available cache size is less than the `min_free_bytes` after reclaiming, increase the reclaim size.
@@ -465,54 +506,43 @@ impl Wal {
 
         // Reclaim the cache entries from the segments.
         let mut reclaimed = 0u64;
-        let mut cached_entries: Vec<_> = self
-            .segments
-            .iter()
-            .map(|segment| (segment, segment.block_cache.iter()))
-            .flat_map(|(seg, it)| it.map(move |(_, v)| (seg, v)))
-            .filter(|(_, entry)| entry.is_loaded() && !entry.is_strong_referenced())
-            .collect();
 
-        // Sort the cached entries by the score based on the access frequency and the last access time.
-        cached_entries.sort_by(|(_, a), (_, b)| {
-            let a_score = a.score();
-            let b_score = b.score();
-            a_score.cmp(&b_score)
+        // build a skiplist to sort the segments by the lowest score of block cache.
+        let mut score_list = unsafe {
+            skiplist::OrderedSkipList::<(&mut LogSegment, u64)>::with_comp(|a, b| a.1.cmp(&b.1))
+        };
+        self.segments.iter_mut().for_each(|segment| {
+            let score = segment.block_cache.min_score();
+            if score > 0 {
+                score_list.insert((segment, score));
+            }
         });
 
-        // Key is the wal offset of the segment, value is the wal offset of the entry.
-        let mut to_reclaim_entries: HashMap<u64, Vec<u64>> = HashMap::new();
+        // Reclaim the cache entries from the segment with lowest score.
+        loop {
+            if reclaimed >= to_reclaim || score_list.is_empty() {
+                break;
+            }
 
-        let _: Vec<_> = cached_entries
-            .iter()
-            .map_while(|(seg, entry)| {
-                if reclaimed >= to_reclaim {
-                    return None;
-                }
+            let (segment, _) = score_list.pop_front().unwrap();
+            let last_wal_offset = segment.block_cache.wal_offset_of_last_cache_entry();
+            let entry = segment.block_cache.remove_by_score();
 
+            if let Some(entry) = entry {
                 // The last writable entry should not be reclaimed.
-                if seg.status == Status::ReadWrite {
+                if segment.status == Status::ReadWrite {
                     // Skip the last writable entry.
-                    if entry.wal_offset() == seg.block_cache.wal_offset_of_last_cache_entry() {
-                        return Some(());
+                    if entry.wal_offset() == last_wal_offset {
+                        continue;
                     }
                 }
-                let size = entry.capacity();
-                to_reclaim_entries
-                    .entry(seg.wal_offset)
-                    .or_default()
-                    .push(entry.wal_offset());
 
-                reclaimed += size as u64;
-                Some(())
-            })
-            .collect();
+                reclaimed += entry.capacity() as u64;
 
-        // Reclaim the cache entries.
-        for (segment_offset, entry_offsets) in to_reclaim_entries {
-            if let Some(segment) = self.segment_file_of(segment_offset) {
-                for entry_offset in entry_offsets {
-                    segment.block_cache.remove_by(entry_offset);
+                // put the segment into the score list if it still has cache entries.
+                let score = segment.block_cache.min_score();
+                if score > 0 {
+                    score_list.insert((segment, score));
                 }
             }
         }
@@ -524,7 +554,7 @@ impl Wal {
         )
     }
 
-    fn alloc_segment(&mut self) -> Result<LogSegment, StoreError> {
+    fn alloc_segment(&self) -> Result<LogSegment, StoreError> {
         let offset = if self.segments.is_empty() {
             0
         } else if let Some(last) = self.segments.back() {
@@ -568,6 +598,7 @@ impl Wal {
         self.inflight_control_tasks.len()
     }
 
+    #[minitrace::trace]
     pub(crate) fn await_control_task_completion(&self) {
         let now = std::time::Instant::now();
         loop {
@@ -615,6 +646,7 @@ impl Wal {
         }
     }
 
+    #[minitrace::trace]
     pub(crate) fn reap_control_tasks(&mut self) -> Result<(), StoreError> {
         // Map of segment offset to syscall result
         let mut m = HashMap::new();
@@ -675,7 +707,7 @@ impl Wal {
                         "About to fallocate LogSegmentFile: `{}` with FD: {}",
                         segment, result
                     );
-                    let sqe = opcode::Fallocate64::new(types::Fd(result), segment.size as i64)
+                    let sqe = opcode::Fallocate::new(types::Fd(result), segment.size)
                         .offset(0)
                         .mode(libc::FALLOC_FL_ZERO_RANGE)
                         .build()
@@ -743,7 +775,7 @@ impl Wal {
                     info!("LogSegmentFile: `{}` is deleted", segment);
                     to_remove.push(offset)
                 }
-                Status::RenameAt => {
+                Status::RenameAt(..) => {
                     info!("LogSegmentFile: `{}` is renamed", segment);
                     segment.status = Status::OpenAt;
                     let sqe = opcode::OpenAt::new(types::Fd(libc::AT_FDCWD), segment.path.as_ptr())
@@ -781,7 +813,6 @@ mod tests {
     use crate::io::buf::AlignedBuf;
     use crate::io::segment::{LogSegment, Status};
     use log::error;
-    use percentage::Percentage;
     use std::error::Error;
     use std::fs::File;
     use std::sync::Arc;
@@ -799,7 +830,7 @@ mod tests {
 
     #[test]
     fn test_load_wals() -> Result<(), StoreError> {
-        let store_base = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
+        let store_base = tempfile::tempdir().map_err(StoreError::IO)?;
         let mut cfg = config::Configuration::default();
         cfg.store.path.set_base(store_base.path().to_str().unwrap());
         cfg.check_and_apply()
@@ -811,9 +842,10 @@ mod tests {
         assert_eq!(segment_sum, wal.segments.len() as u64);
         Ok(())
     }
+
     #[test]
     fn test_expand_wals() -> Result<(), StoreError> {
-        let store_base = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
+        let store_base = tempfile::tempdir().map_err(StoreError::IO)?;
         let mut cfg = config::Configuration::default();
         cfg.store.path.set_base(store_base.path().to_str().unwrap());
         cfg.check_and_apply()
@@ -822,7 +854,6 @@ mod tests {
         let segment_sum = cfg.store.total_segment_file_size / cfg.store.segment_size;
         let config = Arc::new(cfg);
         let files: Vec<_> = (0..10)
-            .into_iter()
             .map(|i| {
                 let f = config
                     .store
@@ -842,7 +873,7 @@ mod tests {
 
     #[test]
     fn test_alloc_segment() -> Result<(), StoreError> {
-        let wal_dir = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
+        let wal_dir = tempfile::tempdir().map_err(StoreError::IO)?;
         let mut cfg = config::Configuration::default();
         cfg.store.path.set_wal(wal_dir.path().to_str().unwrap());
         let config = Arc::new(cfg);
@@ -859,7 +890,7 @@ mod tests {
 
     #[test]
     fn test_writable_segment_count() -> Result<(), StoreError> {
-        let wal_dir = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
+        let wal_dir = tempfile::tempdir().map_err(StoreError::IO)?;
         let mut cfg = config::Configuration::default();
         cfg.store.path.set_wal(wal_dir.path().to_str().unwrap());
         let config = Arc::new(cfg);
@@ -880,7 +911,7 @@ mod tests {
 
     #[test]
     fn test_segment_file_of() -> Result<(), StoreError> {
-        let wal_dir = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
+        let wal_dir = tempfile::tempdir().map_err(StoreError::IO)?;
         let mut cfg = config::Configuration::default();
         cfg.store.path.set_wal(wal_dir.path().to_str().unwrap());
         let config = Arc::new(cfg);
@@ -912,7 +943,7 @@ mod tests {
 
     #[test]
     fn test_delete_segments() -> Result<(), Box<dyn Error>> {
-        let wal_dir = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
+        let wal_dir = tempfile::tempdir().map_err(StoreError::IO)?;
         let mut cfg = config::Configuration::default();
         cfg.store.path.set_wal(wal_dir.path().to_str().unwrap());
         let config = Arc::new(cfg);
@@ -937,14 +968,13 @@ mod tests {
     /// Test try_reclaim_segments
     #[test]
     fn test_try_reclaim_segments() -> Result<(), StoreError> {
-        let wal_dir = tempfile::tempdir().map_err(|e| StoreError::IO(e))?;
+        let wal_dir = tempfile::tempdir().map_err(StoreError::IO)?;
         let mut cfg = config::Configuration::default();
         cfg.store.path.set_wal(wal_dir.path().to_str().unwrap());
         let config = Arc::new(cfg);
         let mut wal = create_wal(&config)?;
 
         (0..2)
-            .into_iter()
             .map(|_| wal.open_segment_directly())
             .collect::<Result<Vec<()>, StoreError>>()?;
 
@@ -986,12 +1016,6 @@ mod tests {
         });
 
         let (_reclaimed_bytes, _free_bytes) = wal.try_reclaim(4096);
-
-        // Assert the current cache size is under the low watermark
-        let low_percent = Percentage::from(wal.wal_cache.low_water_mark);
-        assert!(
-            wal.wal_cache.current_cache_size < low_percent.apply_to(wal.wal_cache.max_cache_size)
-        );
         Ok(())
     }
 }

@@ -2,13 +2,16 @@ use bytes::Bytes;
 use codec::frame::Frame;
 
 use chrono::prelude::*;
-use flatbuffers::FlatBufferBuilder;
+use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use futures::future::join_all;
 use log::{error, trace, warn};
 use model::payload::Payload;
-use protocol::rpc::header::{AppendResponseArgs, AppendResultEntryArgs, ErrorCode, StatusArgs};
-use std::{cell::UnsafeCell, fmt, rc::Rc};
-use store::{error::AppendError, option::WriteOptions, AppendRecordRequest, AppendResult, Store};
+use protocol::rpc::header::{
+    AppendResponse, AppendResponseArgs, AppendResultEntry, AppendResultEntryArgs, ErrorCode,
+    Status, StatusArgs,
+};
+use std::{fmt, rc::Rc};
+use store::{error::AppendError, option::WriteOptions, AppendRecordRequest, AppendResult};
 
 use crate::{error::ServiceError, range_manager::RangeManager};
 
@@ -68,13 +71,8 @@ impl Append {
     ///
     /// `response` - Mutable response frame reference, into which required business data are filled.
     ///
-    pub(crate) async fn apply<S, M>(
-        &self,
-        store: Rc<S>,
-        range_manager: Rc<UnsafeCell<M>>,
-        response: &mut Frame,
-    ) where
-        S: Store,
+    pub(crate) async fn apply<M>(&self, range_manager: Rc<M>, response: &mut Frame)
+    where
         M: RangeManager,
     {
         match self.replicated() {
@@ -105,31 +103,14 @@ impl Append {
         };
 
         let futures: Vec<_> = to_store_requests
-            .iter()
+            .into_iter()
             .map(|req| {
-                trace!("{}", req);
+                trace!("Received append request: {}", req);
                 let result = async {
-                    if let Some(range) = unsafe { &mut *range_manager.get() }
-                        .get_range(req.stream_id, req.range_index)
-                    {
-                        if let Some(window) = range.window_mut() {
-                            window.check_barrier(req)?;
-                        } else {
-                            warn!(
-                                "try append to sealed range[{}#{}]",
-                                req.stream_id, req.range_index
-                            );
-                            return Err(AppendError::BadRequest);
-                        }
-                    } else {
-                        warn!(
-                            "Target stream/range is not found. stream-id={}, range-index={}",
-                            req.stream_id, req.range_index
-                        );
-                        return Err(AppendError::RangeNotFound);
-                    }
+                    range_manager.check_barrier(req.stream_id, req.range_index, &req)?;
                     let options = WriteOptions::default();
-                    let append_result = store.append(options, req.clone()).await?;
+                    // Append to store
+                    let append_result = range_manager.append(&options, req).await?;
                     Ok(append_result)
                 };
                 Box::pin(result)
@@ -139,7 +120,7 @@ impl Append {
         let res_from_store: Vec<Result<AppendResult, AppendError>> = join_all(futures).await;
 
         let mut builder = FlatBufferBuilder::with_capacity(MIN_BUFFER_SIZE);
-        let ok_status = protocol::rpc::header::Status::create(
+        let ok_status = Status::create(
             &mut builder,
             &StatusArgs {
                 code: ErrorCode::OK,
@@ -147,56 +128,41 @@ impl Append {
                 detail: None,
             },
         );
-        let append_results: Vec<_> = res_from_store
-            .iter()
-            .map(|res| {
-                match res {
-                    Ok(result) => {
-                        if let Err(e) = unsafe { &mut *range_manager.get() }.commit(
-                            result.stream_id,
-                            result.range_index as i32,
-                            result.offset as u64,
-                            result.last_offset_delta,
-                            result.bytes_len,
-                        ) {
-                            warn!(
-                                "Failed to ack offset on store completion to stream manager: {:?}",
-                                e
-                            );
-                        }
-                        let args = AppendResultEntryArgs {
-                            timestamp_ms: Utc::now().timestamp(),
-                            status: Some(ok_status),
-                        };
-                        protocol::rpc::header::AppendResultEntry::create(&mut builder, &args)
-                    }
-                    Err(e) => {
-                        // TODO: what to do with the offset on failure?
-                        warn!("Append failed: {:?}", e);
-                        let (err_code, error_message) = self.convert_store_error(e);
 
-                        let mut error_message_fb = None;
-                        if let Some(error_message) = error_message {
-                            error_message_fb = Some(builder.create_string(error_message.as_str()));
-                        }
-                        let status = protocol::rpc::header::Status::create(
-                            &mut builder,
-                            &StatusArgs {
-                                code: err_code,
-                                message: error_message_fb,
-                                detail: None,
-                            },
-                        );
-
-                        let args = AppendResultEntryArgs {
-                            timestamp_ms: 0,
-                            status: Some(status),
+        let mut append_results: Vec<_> = vec![];
+        for res in &res_from_store {
+            match res {
+                Ok(result) => {
+                    if let Err(e) = range_manager.commit(
+                        result.stream_id,
+                        result.range_index as i32,
+                        result.offset,
+                        result.last_offset_delta,
+                        result.bytes_len,
+                    ) {
+                        warn!("Failed to ack offset to stream manager: {:?}", e);
+                        let code = match e {
+                            ServiceError::AlreadySealed => ErrorCode::RANGE_ALREADY_SEALED,
+                            _ => ErrorCode::RS_INTERNAL_SERVER_ERROR,
                         };
-                        protocol::rpc::header::AppendResultEntry::create(&mut builder, &args)
+                        Self::handle_error(&mut append_results, &mut builder, code, &e.to_string());
+                        continue;
                     }
+                    let args = AppendResultEntryArgs {
+                        timestamp_ms: Utc::now().timestamp(),
+                        status: Some(ok_status),
+                    };
+                    append_results.push(AppendResultEntry::create(&mut builder, &args));
                 }
-            })
-            .collect();
+                Err(e) => {
+                    // TODO: what to do with the offset on failure?
+                    warn!("Failed to append records to store: {:?}", e);
+
+                    let (err_code, error_message) = Self::convert_store_error(e);
+                    Self::handle_error(&mut append_results, &mut builder, err_code, &error_message);
+                }
+            }
+        }
 
         let append_results_fb = builder.create_vector(&append_results);
 
@@ -205,12 +171,34 @@ impl Append {
             entries: Some(append_results_fb),
             status: Some(ok_status),
         };
-
-        let response_header =
-            protocol::rpc::header::AppendResponse::create(&mut builder, &res_args);
-        trace!("AppendResponseHeader: {:?}", response_header);
+        let response_header = AppendResponse::create(&mut builder, &res_args);
         let res_header = finish_response_builder(&mut builder, response_header);
         response.header = Some(res_header);
+    }
+
+    fn handle_error<'a, 'b>(
+        append_results: &mut Vec<WIPOffset<AppendResultEntry<'b>>>,
+        builder: &mut FlatBufferBuilder<'a>,
+        code: ErrorCode,
+        message: &str,
+    ) where
+        'a: 'b,
+    {
+        let message = Some(builder.create_string(message));
+        let status = Status::create(
+            builder,
+            &StatusArgs {
+                code,
+                message,
+                detail: None,
+            },
+        );
+
+        let args = AppendResultEntryArgs {
+            timestamp_ms: 0,
+            status: Some(status),
+        };
+        append_results.push(AppendResultEntry::create(builder, &args));
     }
 
     fn build_store_requests(&self) -> Result<Vec<AppendRecordRequest>, ErrorCode> {
@@ -226,9 +214,9 @@ impl Append {
             })?
         {
             let request = AppendRecordRequest {
-                stream_id: entry.stream_id as i64,
+                stream_id: entry.stream_id,
                 range_index: entry.index as i32,
-                offset: entry.offset.map(|value| value as i64).unwrap_or(-1),
+                offset: entry.offset.ok_or(ErrorCode::BAD_REQUEST)?,
                 len: entry.len,
                 buffer: self.payload.slice(pos..pos + len),
             };
@@ -240,38 +228,24 @@ impl Append {
         Ok(append_requests)
     }
 
-    fn convert_store_error(&self, err: &AppendError) -> (ErrorCode, Option<String>) {
-        match err {
-            AppendError::SubmissionQueue => (
-                ErrorCode::PD_NO_AVAILABLE_RS,
-                Some(AppendError::SubmissionQueue.to_string()),
-            ),
-            AppendError::ChannelRecv => (
-                ErrorCode::PD_NO_AVAILABLE_RS,
-                Some(AppendError::ChannelRecv.to_string()),
-            ),
-            AppendError::System(inner) => (
-                ErrorCode::PD_NO_AVAILABLE_RS,
-                Some(AppendError::System(*inner).to_string()),
-            ),
-            AppendError::BadRequest => (
-                ErrorCode::BAD_REQUEST,
-                Some(AppendError::BadRequest.to_string()),
-            ),
-            AppendError::Internal => (
-                ErrorCode::RS_INTERNAL_SERVER_ERROR,
-                Some(AppendError::Internal.to_string()),
-            ),
-            // TODO: this is a workaround for now, return ok for a committed error to pass the test
-            AppendError::Committed => (ErrorCode::OK, None),
-            _ => (
-                ErrorCode::RS_INTERNAL_SERVER_ERROR,
-                Some(AppendError::Internal.to_string()),
-            ),
-        }
+    fn convert_store_error(err: &AppendError) -> (ErrorCode, String) {
+        let code = match err {
+            AppendError::RangeNotFound => ErrorCode::RANGE_NOT_FOUND,
+            AppendError::RangeSealed => ErrorCode::RANGE_ALREADY_SEALED,
+            AppendError::BadRequest => ErrorCode::BAD_REQUEST,
+            // For the committed error, the client could regard it as success.
+            AppendError::Committed => ErrorCode::APPEND_TO_COMMITTED_OFFSET,
+            AppendError::Inflight => ErrorCode::APPEND_TO_PENDING_OFFSET,
+            AppendError::OutOfOrder => ErrorCode::APPEND_TO_OVERTAKEN_OFFSET,
+            // For other errors, return internal server error
+            _ => ErrorCode::RS_INTERNAL_SERVER_ERROR,
+        };
+
+        (code, err.to_string())
     }
 }
 
+/// Converts ServiceError which is returned from RangeManager to AppendError.
 impl From<ServiceError> for AppendError {
     fn from(err: ServiceError) -> Self {
         match err {
@@ -291,16 +265,169 @@ impl fmt::Display for Append {
                 "Failed to decode append entries from payload. Cause: {:?}",
                 e
             ),
-            Ok(entries) => entries.iter().fold(Ok(()), |result, entry| {
-                result.and_then(|_| {
-                    let offset = entry.offset.map(|value| value as i64).unwrap_or(-1);
-                    write!(
-                        f,
-                        "AppendEntry: stream-id={}, range-index={}, offset={}, len={}",
-                        entry.stream_id, entry.index, offset, entry.len
-                    )
-                })
+            Ok(entries) => entries.iter().try_for_each(|entry| {
+                let offset = entry.offset.map(|value| value as i64).unwrap_or(-1);
+                write!(
+                    f,
+                    "AppendEntry: stream-id={}, range-index={}, offset={}, len={}",
+                    entry.stream_id, entry.index, offset, entry.len
+                )
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::range_manager::MockRangeManager;
+    use bytes::{BufMut, Bytes, BytesMut};
+    use codec::frame::Frame;
+    use model::record::flat_record::RecordMagic;
+    use protocol::{
+        flat_model::records::{KeyValueT, RecordBatchMetaT},
+        rpc::header::{AppendResponse, ErrorCode, OperationCode},
+    };
+    use std::rc::Rc;
+    use store::{error::AppendError, AppendRecordRequest, AppendResult};
+
+    fn create_append_entry() -> Bytes {
+        let mut buf = BytesMut::new();
+        buf.put_u8(RecordMagic::Magic0 as u8);
+
+        let mut batch_metadata = RecordBatchMetaT::default();
+        batch_metadata.base_offset = 10;
+        batch_metadata.last_offset_delta = 1;
+        batch_metadata.range_index = 1;
+        batch_metadata.stream_id = 1;
+        batch_metadata.flags = 1;
+        batch_metadata.base_timestamp = 1000;
+
+        let mut kv = vec![];
+        for i in 0..3 {
+            let mut entry = KeyValueT::default();
+            entry.key = format!("key-{}", i);
+            entry.value = format!("value-{}", i);
+            kv.push(entry);
+        }
+        batch_metadata.properties = Some(kv);
+
+        let mut fbb = flatbuffers::FlatBufferBuilder::default();
+        let batch = batch_metadata.pack(&mut fbb);
+        fbb.finish(batch, None);
+        let data = fbb.finished_data();
+        buf.put_u32(data.len() as u32);
+        buf.put_slice(data);
+        buf.put_u32(0);
+        buf.freeze()
+    }
+
+    #[test]
+    fn test_parse_frame() {
+        let frame = Frame::new(OperationCode::APPEND);
+        match super::Append::parse_frame(&frame) {
+            Ok(_) => {
+                panic!("Bad request should have failed parsing");
+            }
+            Err(ec) => {
+                assert_eq!(ec, ErrorCode::BAD_REQUEST);
+            }
+        }
+    }
+
+    #[test]
+    fn test_apply() {
+        ulog::try_init_log();
+        let mut range_manager = MockRangeManager::default();
+        range_manager
+            .expect_check_barrier()
+            .once()
+            .returning_st(|_stream_id, _index, _: &AppendRecordRequest| Ok(()));
+
+        range_manager
+            .expect_append()
+            .once()
+            .returning_st(|_opt, req| {
+                let append = AppendResult {
+                    stream_id: req.stream_id,
+                    range_index: req.range_index as u32,
+                    offset: req.offset,
+                    last_offset_delta: 1,
+                    wal_offset: 0,
+                    bytes_len: req.buffer.len() as u32,
+                };
+                Ok(append)
+            });
+
+        range_manager.expect_commit().once().returning_st(
+            |_stream_id, _range_index, _offset, _last_offset_delta, _bytes_len| Ok(()),
+        );
+
+        let mut request = Frame::new(OperationCode::APPEND);
+        request.payload = Some(vec![create_append_entry()]);
+
+        let handler = super::Append::parse_frame(&request).expect("Parse shall not raise an error");
+        let mut response = Frame::new(OperationCode::APPEND);
+        tokio_uring::start(async move {
+            handler.apply(Rc::new(range_manager), &mut response).await;
+
+            if let Some(ref buf) = response.header {
+                match flatbuffers::root::<AppendResponse>(buf) {
+                    Ok(resp) => {
+                        assert_eq!(resp.status().code(), ErrorCode::OK);
+                        resp.entries()
+                            .iter()
+                            .flat_map(|entries| entries.iter())
+                            .for_each(|e| {
+                                assert_eq!(e.status().code(), ErrorCode::OK);
+                            });
+                    }
+                    Err(_e) => {
+                        panic!("Failed to decode response header using flatbuffer");
+                    }
+                }
+            } else {
+                panic!("Frame should have an append-response header");
+            }
+        })
+    }
+
+    #[test]
+    fn test_apply_when_out_of_order() {
+        ulog::try_init_log();
+        let mut range_manager = MockRangeManager::default();
+        range_manager.expect_check_barrier().once().returning_st(
+            |_stream_id, _index, _: &AppendRecordRequest| Err(AppendError::OutOfOrder),
+        );
+
+        let mut request = Frame::new(OperationCode::APPEND);
+        request.payload = Some(vec![create_append_entry()]);
+
+        let handler = super::Append::parse_frame(&request).expect("Parse shall not raise an error");
+        let mut response = Frame::new(OperationCode::APPEND);
+        tokio_uring::start(async move {
+            handler.apply(Rc::new(range_manager), &mut response).await;
+
+            if let Some(ref buf) = response.header {
+                match flatbuffers::root::<AppendResponse>(buf) {
+                    Ok(resp) => {
+                        assert_eq!(resp.status().code(), ErrorCode::OK);
+                        resp.entries()
+                            .iter()
+                            .flat_map(|entries| entries.iter())
+                            .for_each(|e| {
+                                assert_eq!(
+                                    e.status().code(),
+                                    ErrorCode::APPEND_TO_OVERTAKEN_OFFSET
+                                );
+                            });
+                    }
+                    Err(_e) => {
+                        panic!("Failed to decode response header using flatbuffer");
+                    }
+                }
+            } else {
+                panic!("Frame should have an append-response header");
+            }
+        })
     }
 }

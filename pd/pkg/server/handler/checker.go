@@ -77,6 +77,13 @@ func (c Checker) DescribeStream(req *protocol.DescribeStreamRequest, resp *proto
 	c.Handler.DescribeStream(req, resp)
 }
 
+func (c Checker) TrimStream(req *protocol.TrimStreamRequest, resp *protocol.TrimStreamResponse) {
+	if !c.Handler.Check(req, resp) {
+		return
+	}
+	c.Handler.TrimStream(req, resp)
+}
+
 func (c Checker) ReportMetrics(req *protocol.ReportMetricsRequest, resp *protocol.ReportMetricsResponse) {
 	// all pd nodes will handle report metrics request, so we don't need to check leader here.
 	c.Handler.ReportMetrics(req, resp)
@@ -85,4 +92,25 @@ func (c Checker) ReportMetrics(req *protocol.ReportMetricsRequest, resp *protoco
 func (c Checker) DescribePDCluster(req *protocol.DescribePDClusterRequest, resp *protocol.DescribePDClusterResponse) {
 	// all pd nodes will handle describe PD cluster request, so we don't need to check leader here.
 	c.Handler.DescribePDCluster(req, resp)
+}
+
+func (c Checker) CommitObject(req *protocol.CommitObjectRequest, resp *protocol.CommitObjectResponse) {
+	if !c.Handler.Check(req, resp) {
+		return
+	}
+	c.Handler.CommitObject(req, resp)
+}
+
+func (c Checker) ListResource(req *protocol.ListResourceRequest, resp *protocol.ListResourceResponse) {
+	if !c.Handler.Check(req, resp) {
+		return
+	}
+	c.Handler.ListResource(req, resp)
+}
+
+func (c Checker) WatchResource(req *protocol.WatchResourceRequest, resp *protocol.WatchResourceResponse) {
+	if !c.Handler.Check(req, resp) {
+		return
+	}
+	c.Handler.WatchResource(req, resp)
 }

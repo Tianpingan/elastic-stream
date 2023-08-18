@@ -23,24 +23,25 @@
 #![feature(result_flattening)]
 #![feature(iterator_try_collect)]
 #![feature(io_error_more)]
+#![feature(map_try_insert)]
 
-pub mod cursor;
 pub mod error;
 mod index;
-mod io;
+pub(crate) mod io;
 mod offset_manager;
 pub mod option;
 mod request;
-mod store;
+pub mod store;
 pub mod util;
 
 use self::option::{ReadOptions, WriteOptions};
 use error::{AppendError, FetchError, StoreError};
-use model::range::RangeMetadata;
+use model::range::{RangeEvent, RangeMetadata};
 use std::sync::Arc;
 
 pub use crate::io::record::RECORD_PREFIX_LENGTH;
 pub use crate::store::append_result::AppendResult;
+pub use crate::store::buffer::store::BufferedStore;
 pub use crate::store::elastic_store::ElasticStore;
 pub use crate::store::fetch_result::FetchResult;
 pub use request::AppendRecordRequest;
@@ -51,13 +52,18 @@ use mockall::automock;
 /// Definition of core storage trait.
 #[cfg_attr(any(test, feature = "mock"), automock)]
 pub trait Store {
+    /// Start daemon service of the store.
+    ///
+    /// This method may only be called in async runtime as it usually spawns a task that runs in the background.
+    fn start(&self) {}
+
     /// Append a new record into store.
     ///
     /// * `options` - Write options, specifying how the record is written to persistent medium.
     /// * `record` - Data record to append.
     async fn append(
         &self,
-        options: WriteOptions,
+        options: &WriteOptions,
         request: AppendRecordRequest,
     ) -> Result<AppendResult, AppendError>;
 
@@ -77,7 +83,7 @@ pub trait Store {
     /// if `filter` returns true, the range is kept in the final result vector; dropped otherwise.
     async fn list_by_stream<F>(
         &self,
-        stream_id: i64,
+        stream_id: u64,
         filter: F,
     ) -> Result<Vec<RangeMetadata>, StoreError>
     where
@@ -89,12 +95,16 @@ pub trait Store {
     /// Create a stream range in metadata.
     async fn create(&self, range: RangeMetadata) -> Result<(), StoreError>;
 
-    /// Max record offset in the store of the specified stream.
-    fn max_record_offset(&self, stream_id: i64, range: u32) -> Result<Option<u64>, StoreError>;
+    /// Get range end offset in current range server.
+    fn get_range_end_offset(&self, stream_id: u64, range: u32) -> Result<Option<u64>, StoreError>;
 
     fn id(&self) -> i32;
 
     fn config(&self) -> Arc<config::Configuration>;
+
+    /// Handle range lifecycle event. The events will be used in:
+    /// - wal cleanup
+    async fn handle_range_event(&self, events: Vec<RangeEvent>);
 }
 
 #[cfg(test)]

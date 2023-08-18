@@ -1,10 +1,16 @@
-use crate::{request, response, NodeState};
-use codec::{
-    error::FrameError,
-    frame::{Frame, OperationCode},
+use crate::{
+    error::ClientError,
+    heartbeat::HeartbeatData,
+    request::{self, Request},
+    response::{self, Response},
+    state::SessionState,
+    NodeRole,
 };
+use codec::{error::FrameError, frame::Frame};
 
-use model::client_role::ClientRole;
+use futures::Future;
+use protocol::rpc::header::{ClientRole, GoAwayFlags, OperationCode, RangeServerState};
+use tower::Service;
 use transport::connection::Connection;
 
 use local_sync::oneshot;
@@ -15,6 +21,7 @@ use std::{
     net::SocketAddr,
     rc::{Rc, Weak},
     sync::Arc,
+    task::{Context, Poll},
     time::Instant,
 };
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -36,7 +43,16 @@ pub(crate) struct Session {
 
     idle_since: Rc<RefCell<Instant>>,
 
-    state: Rc<RefCell<NodeState>>,
+    /// Role of the peer node in its cluster.
+    role: Rc<RefCell<NodeRole>>,
+
+    /// State of the current session.
+    ///
+    /// By default, it is `Active`. Once it received `GoAway` frame from peer server, will mark itself as
+    /// `GoAway`.
+    ///
+    /// Session at `GoAway` state should close itself as soon as possible.
+    state: Rc<RefCell<SessionState>>,
 }
 
 impl Session {
@@ -45,6 +61,7 @@ impl Session {
         connection: Rc<Connection>,
         inflight_requests: Rc<UnsafeCell<HashMap<u32, InvocationContext>>>,
         sessions: Weak<RefCell<HashMap<SocketAddr, Session>>>,
+        state: Rc<RefCell<SessionState>>,
         target: SocketAddr,
         mut shutdown: broadcast::Receiver<()>,
     ) {
@@ -109,6 +126,12 @@ impl Session {
                                 let inflight = unsafe { &mut *inflight_requests.get() };
                                 if frame.is_response() {
                                     Session::handle_response(inflight, frame, target);
+                                } else if frame.operation_code == OperationCode::GOAWAY {
+                                    *state.borrow_mut() = SessionState::GoAway;
+                                    let reason = if frame.has_go_away_flag(GoAwayFlags::SERVER_MAINTENANCE) {
+                                        "server maintenance"
+                                    } else {"connection being idle"};
+                                    info!("Peer server[{}] has notified to go-away due to {}.", target, reason);
                                 } else {
                                     warn!( "Received an unexpected request frame from target={}", target);
                                 }
@@ -154,10 +177,13 @@ impl Session {
         let connection = Rc::new(Connection::new(stream, endpoint));
         let inflight = Rc::new(UnsafeCell::new(HashMap::new()));
 
+        let state = Rc::new(RefCell::new(SessionState::Active));
+
         Self::spawn_read_loop(
             Rc::clone(&connection),
             Rc::clone(&inflight),
             sessions,
+            Rc::clone(&state),
             target,
             shutdown.subscribe(),
         );
@@ -168,7 +194,8 @@ impl Session {
             connection,
             inflight_requests: inflight,
             idle_since: Rc::new(RefCell::new(Instant::now())),
-            state: Rc::new(RefCell::new(NodeState::Unknown)),
+            role: Rc::new(RefCell::new(NodeRole::Unknown)),
+            state,
         }
     }
 
@@ -181,7 +208,7 @@ impl Session {
 
         // Update last read/write instant.
         *self.idle_since.borrow_mut() = Instant::now();
-        let mut frame = Frame::new(OperationCode::Unknown);
+        let mut frame = Frame::new(OperationCode::UNKNOWN);
 
         // Set frame header
         frame.header = Some((&request).into());
@@ -189,47 +216,72 @@ impl Session {
         // Set operation code
         match &request.headers {
             request::Headers::Heartbeat { .. } => {
-                frame.operation_code = OperationCode::Heartbeat;
+                frame.operation_code = OperationCode::HEARTBEAT;
             }
 
             request::Headers::CreateStream { .. } => {
-                frame.operation_code = OperationCode::CreateStream;
+                frame.operation_code = OperationCode::CREATE_STREAM;
             }
 
             request::Headers::DescribeStream { .. } => {
-                frame.operation_code = OperationCode::DescribeStream;
+                frame.operation_code = OperationCode::DESCRIBE_STREAM;
             }
 
             request::Headers::ListRange { .. } => {
-                frame.operation_code = OperationCode::ListRange;
+                frame.operation_code = OperationCode::LIST_RANGE;
             }
 
             request::Headers::AllocateId { .. } => {
-                frame.operation_code = OperationCode::AllocateId;
+                frame.operation_code = OperationCode::ALLOCATE_ID;
             }
 
             request::Headers::DescribePlacementDriver { .. } => {
-                frame.operation_code = OperationCode::DescribePlacementDriver;
+                frame.operation_code = OperationCode::DESCRIBE_PLACEMENT_DRIVER;
             }
 
             request::Headers::CreateRange { .. } => {
-                frame.operation_code = OperationCode::CreateRange;
+                frame.operation_code = OperationCode::CREATE_RANGE;
             }
 
             request::Headers::SealRange { .. } => {
-                frame.operation_code = OperationCode::SealRange;
+                frame.operation_code = OperationCode::SEAL_RANGE;
             }
 
             request::Headers::Append => {
-                frame.operation_code = OperationCode::Append;
+                frame.operation_code = OperationCode::APPEND;
             }
 
             request::Headers::Fetch { .. } => {
-                frame.operation_code = OperationCode::Fetch;
+                frame.operation_code = OperationCode::FETCH;
             }
 
             request::Headers::ReportMetrics { .. } => {
-                frame.operation_code = OperationCode::ReportMetrics;
+                frame.operation_code = OperationCode::REPORT_METRICS;
+            }
+
+            request::Headers::ReportRangeProgress { .. } => {
+                frame.operation_code = OperationCode::REPORT_REPLICA_PROGRESS;
+            }
+
+            request::Headers::CommitObject { .. } => {
+                frame.operation_code = OperationCode::COMMIT_OBJECT;
+            }
+
+            request::Headers::ListResource { .. } => {
+                frame.operation_code = OperationCode::LIST_RESOURCE;
+            }
+
+            request::Headers::WatchResource { .. } => {
+                frame.operation_code = OperationCode::WATCH_RESOURCE;
+            }
+            request::Headers::UpdateStream { .. } => {
+                frame.operation_code = OperationCode::UPDATE_STREAM;
+            }
+            request::Headers::TrimStream { .. } => {
+                frame.operation_code = OperationCode::TRIM_STREAM;
+            }
+            request::Headers::DeleteStream { .. } => {
+                frame.operation_code = OperationCode::DELETE_STREAM;
             }
         };
 
@@ -246,7 +298,7 @@ impl Session {
             Ok(_) => {
                 trace!(
                     "Write request[opcode={}] bounded for {} using stream-id={} to socket buffer",
-                    opcode,
+                    opcode.variant_name().unwrap_or("INVALID_OPCODE"),
                     self.connection.peer_address(),
                     stream_id,
                 );
@@ -254,7 +306,7 @@ impl Session {
             Err(e) => {
                 error!(
                     "Failed to write request[opcode={}] bounded for {} to socket buffer. Cause: {:?}",
-                    opcode, self.connection.peer_address(), e
+                    opcode.variant_name().unwrap_or("INVALID_OPCODE"), self.connection.peer_address(), e
                 );
                 if let Some(ctx) = inflight_requests.remove(&stream_id) {
                     return Err(ctx);
@@ -265,9 +317,9 @@ impl Session {
         Ok(())
     }
 
-    pub(crate) async fn heartbeat(&self, role: ClientRole) {
+    pub(crate) async fn heartbeat(&self, data: &HeartbeatData) {
         let last = *self.idle_since.borrow();
-        if Instant::now() - last < self.config.client_heartbeat_interval() {
+        if !data.mandatory() && Instant::now() - last < self.config.client_heartbeat_interval() {
             return;
         }
 
@@ -275,17 +327,21 @@ impl Session {
             timeout: self.config.client_io_timeout(),
             headers: request::Headers::Heartbeat {
                 client_id: self.config.client.client_id.clone(),
-                range_server: if role == ClientRole::RangeServer {
-                    Some(self.config.server.range_server())
+                range_server: if data.role == ClientRole::CLIENT_ROLE_RANGE_SERVER {
+                    let mut range_server = self.config.server.range_server();
+                    range_server.state = data
+                        .state
+                        .unwrap_or(RangeServerState::RANGE_SERVER_STATE_READ_WRITE);
+                    Some(range_server)
                 } else {
                     None
                 },
-                role,
+                role: data.role,
             },
             body: None,
         };
 
-        let mut frame = Frame::new(OperationCode::Heartbeat);
+        let mut frame = Frame::new(OperationCode::HEARTBEAT);
         frame.header = Some((&request).into());
         let stream_id = frame.stream_id;
         let opcode = frame.operation_code;
@@ -293,7 +349,7 @@ impl Session {
             Ok(_) => {
                 trace!(
                     "Write request[opcode={}] bounded for {} using stream-id={} to socket buffer",
-                    opcode,
+                    opcode.variant_name().unwrap_or("INVALID_OPCODE"),
                     self.connection.peer_address(),
                     stream_id,
                 );
@@ -302,25 +358,29 @@ impl Session {
             Err(e) => {
                 error!(
                     "Failed to write request[opcode={}] bounded for {} to socket buffer. Cause: {:?}",
-                    opcode, self.connection.peer_address(), e
+                    opcode.variant_name().unwrap_or("INVALID_OPCODE"), self.connection.peer_address(), e
                 );
             }
         }
     }
 
-    pub(crate) fn state(&self) -> NodeState {
-        *self.state.borrow()
+    pub(crate) fn role(&self) -> NodeRole {
+        *self.role.borrow()
     }
 
-    pub(crate) fn set_state(&self, state: NodeState) {
-        let current = *self.state.borrow();
+    pub(crate) fn set_role(&self, state: NodeRole) {
+        let current = *self.role.borrow();
         if current != state {
             info!(
                 "Node-state of {} is changed: {:?} --> {:?}",
                 self.target, current, state
             );
-            *self.state.borrow_mut() = state;
+            *self.role.borrow_mut() = state;
         }
+    }
+
+    pub fn state(&self) -> SessionState {
+        *self.state.borrow()
     }
 
     fn handle_response(
@@ -331,12 +391,15 @@ impl Session {
         let stream_id = frame.stream_id;
         trace!(
             "Received {} response for stream-id={} from {}",
-            frame.operation_code,
+            frame
+                .operation_code
+                .variant_name()
+                .unwrap_or("INVALID_OPCODE"),
             stream_id,
             target
         );
 
-        if frame.operation_code == OperationCode::Heartbeat {
+        if frame.operation_code == OperationCode::HEARTBEAT {
             return;
         }
 
@@ -347,74 +410,93 @@ impl Session {
                     response.on_system_error(&frame);
                 } else {
                     match frame.operation_code {
-                        OperationCode::ListRange => {
+                        OperationCode::LIST_RANGE => {
                             response.on_list_ranges(&frame);
                         }
 
-                        OperationCode::Unknown => {
+                        OperationCode::UNKNOWN => {
                             warn!("Received an unknown operation code");
                             return;
                         }
 
-                        OperationCode::Ping => todo!(),
+                        OperationCode::PING => todo!(),
 
-                        OperationCode::GoAway => todo!(),
+                        OperationCode::GOAWAY => todo!(),
 
-                        OperationCode::AllocateId => {
+                        OperationCode::ALLOCATE_ID => {
                             response.on_allocate_id(&frame);
                         }
 
-                        OperationCode::Append => {
+                        OperationCode::APPEND => {
                             response.on_append(&frame, &ctx);
                         }
 
-                        OperationCode::Fetch => {
+                        OperationCode::FETCH => {
                             response.on_fetch(&frame, &ctx);
                         }
 
-                        OperationCode::CreateRange => {
+                        OperationCode::CREATE_RANGE => {
                             response.on_create_range(&frame, &ctx);
                         }
 
-                        OperationCode::SealRange => {
+                        OperationCode::SEAL_RANGE => {
                             response.on_seal_range(&frame, &ctx);
                         }
 
-                        OperationCode::SyncRange => {
+                        OperationCode::SYNC_RANGE => {
                             warn!("Received an unexpected `SyncRanges` response");
                             return;
                         }
 
-                        OperationCode::CreateStream => {
+                        OperationCode::CREATE_STREAM => {
                             response.on_create_stream(&frame, &ctx);
                         }
 
-                        OperationCode::DescribeStream => {
+                        OperationCode::DESCRIBE_STREAM => {
                             response.on_describe_stream(&frame, &ctx);
                         }
 
-                        OperationCode::DeleteStream => {
-                            warn!("Received an unexpected `DeleteStreams` response");
-                            return;
+                        OperationCode::DELETE_STREAM => {
+                            response.on_delete_stream(&frame);
                         }
 
-                        OperationCode::UpdateStream => {
-                            warn!("Received an unexpected `UpdateStreams` response");
-                            return;
+                        OperationCode::UPDATE_STREAM => {
+                            response.on_update_stream(&frame);
                         }
 
-                        OperationCode::TrimStream => todo!(),
+                        OperationCode::TRIM_STREAM => {
+                            response.on_trim_stream(&frame);
+                        }
 
-                        OperationCode::ReportMetrics => {
+                        OperationCode::REPORT_METRICS => {
                             response.on_report_metrics(&frame);
                         }
 
-                        OperationCode::DescribePlacementDriver => {
+                        OperationCode::DESCRIBE_PLACEMENT_DRIVER => {
                             response.on_describe_placement_driver(&frame);
                         }
 
-                        OperationCode::Heartbeat => {
+                        OperationCode::HEARTBEAT => {
                             unreachable!();
+                        }
+
+                        OperationCode::REPORT_REPLICA_PROGRESS => {
+                            response.on_report_replica_progress(&frame);
+                        }
+
+                        OperationCode::COMMIT_OBJECT => {
+                            response.on_commit_object(&frame);
+                        }
+
+                        OperationCode::LIST_RESOURCE => {
+                            response.on_list_resource(&frame);
+                        }
+
+                        OperationCode::WATCH_RESOURCE => {
+                            response.on_watch_resource(&frame);
+                        }
+                        _ => {
+                            unreachable!("Unsupported operation code");
                         }
                     }
                 }
@@ -439,7 +521,36 @@ impl Clone for Session {
             connection: Rc::clone(&self.connection),
             inflight_requests: Rc::clone(&self.inflight_requests),
             idle_since: Rc::clone(&self.idle_since),
+            role: Rc::clone(&self.role),
             state: Rc::clone(&self.state),
+        }
+    }
+}
+
+/// A `tower::Service` implementation for `Session`.
+///
+/// # Note feature `GAT` and `type-alias-impl-trait` are required.
+impl Service<Request> for Session {
+    type Response = Response;
+
+    type Error = ClientError;
+
+    type Future = impl Future<Output = Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Request) -> Self::Future {
+        let this = self.clone();
+        async move {
+            let (tx, rx) = oneshot::channel();
+            if let Err(_e) = this.write(req, tx).await {
+                return Err(ClientError::BadRequest);
+            }
+            rx.await.map_err(|_| {
+                ClientError::ChannelClosing("Underlying connection is closed".to_owned())
+            })
         }
     }
 }
@@ -448,8 +559,10 @@ impl Clone for Session {
 mod tests {
 
     use super::*;
+    use log::debug;
     use mock_server::run_listener;
-    use std::error::Error;
+    use std::{error::Error, time::Duration};
+    use tower::timeout::Timeout;
 
     /// Verify it's OK to create a new session.
     #[test]
@@ -470,6 +583,120 @@ mod tests {
                 tx,
             );
 
+            Ok(())
+        })
+    }
+
+    /// Verify it's OK to wrap `Session` into `Timeout` tower middleware.
+    #[test]
+    fn test_session_service() -> Result<(), Box<dyn Error>> {
+        ulog::try_init_log();
+        tokio_uring::start(async {
+            let port = run_listener().await;
+            let target = format!("127.0.0.1:{}", port);
+            let stream = TcpStream::connect(target.parse()?).await?;
+            let config = Arc::new(config::Configuration::default());
+            let sessions = Rc::new(RefCell::new(HashMap::new()));
+            let (tx, _rx) = broadcast::channel(1);
+            let session = Session::new(
+                target.parse()?,
+                stream,
+                &target,
+                &config,
+                Rc::downgrade(&sessions),
+                tx,
+            );
+
+            let mut timeout_session = Timeout::new(session, Duration::from_secs(1));
+            let req = crate::request::Request {
+                timeout: Duration::from_secs(1),
+                headers: request::Headers::Heartbeat {
+                    client_id: "test".to_owned(),
+                    role: ClientRole::CLIENT_ROLE_FRONTEND,
+                    range_server: None,
+                },
+                body: None,
+            };
+            match timeout_session.call(req).await {
+                Ok(_resp) => {
+                    panic!("Should not receive a heartbeat response");
+                }
+                Err(e) => {
+                    assert_eq!(&e.to_string(), "request timed out");
+                }
+            }
+            Ok(())
+        })
+    }
+
+    struct LogService<S> {
+        inner: S,
+    }
+
+    impl<S, Request> tower::Service<Request> for LogService<S>
+    where
+        S: tower::Service<Request> + Clone,
+    {
+        type Response = S::Response;
+        type Error = S::Error;
+        type Future = impl Future<Output = Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.inner.poll_ready(cx)
+        }
+
+        fn call(&mut self, req: Request) -> Self::Future {
+            let mut svc = self.inner.clone();
+            async move {
+                debug!("Before calling inner service");
+                let res = svc.call(req).await;
+                debug!("After calling inner service");
+                res
+            }
+        }
+    }
+
+    /// Verify it's OK to wrap `Session` into `LogService` tower middleware.
+    #[test]
+    fn test_session_service_with_timeout_and_logging() -> Result<(), Box<dyn Error>> {
+        ulog::try_init_log();
+        tokio_uring::start(async {
+            let port = run_listener().await;
+            let target = format!("127.0.0.1:{}", port);
+            let stream = TcpStream::connect(target.parse()?).await?;
+            let config = Arc::new(config::Configuration::default());
+            let sessions = Rc::new(RefCell::new(HashMap::new()));
+            let (tx, _rx) = broadcast::channel(1);
+            let session = Session::new(
+                target.parse()?,
+                stream,
+                &target,
+                &config,
+                Rc::downgrade(&sessions),
+                tx,
+            );
+
+            let timeout_session = Timeout::new(session, Duration::from_secs(1));
+            let req = crate::request::Request {
+                timeout: Duration::from_secs(1),
+                headers: request::Headers::Heartbeat {
+                    client_id: "test".to_owned(),
+                    role: ClientRole::CLIENT_ROLE_FRONTEND,
+                    range_server: None,
+                },
+                body: None,
+            };
+            let mut svc = LogService {
+                inner: timeout_session,
+            };
+            match svc.call(req).await {
+                Ok(_resp) => {
+                    panic!("Should not receive a heartbeat response");
+                }
+                Err(e) => {
+                    assert_eq!(&e.to_string(), "request timed out");
+                }
+            }
             Ok(())
         })
     }

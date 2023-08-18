@@ -11,6 +11,7 @@ mod tests {
 
     use codec::frame::Frame;
     use log::trace;
+    use protocol::rpc::header::OperationCode;
 
     use super::{
         client_call::ClientCall,
@@ -44,11 +45,9 @@ mod tests {
         }
 
         fn drain(&mut self, stream_id: u64, offset: u64) -> Option<Vec<ClientCall<Observer>>> {
-            if let Some(v) = self.entries.get_mut(&stream_id) {
-                Some(v.extract_if(|call| call.ready(offset)).collect())
-            } else {
-                None
-            }
+            self.entries
+                .get_mut(&stream_id)
+                .map(|v| v.extract_if(|call| call.ready(offset)).collect())
         }
 
         fn drain_if<F>(&mut self, pred: F) -> Vec<ClientCall<Observer>>
@@ -71,7 +70,7 @@ mod tests {
         service.put(
             0,
             ClientCall::new(
-                Frame::new(codec::frame::OperationCode::Fetch),
+                Frame::new(OperationCode::FETCH),
                 TestResponseObserver,
                 0,
                 minstant::Instant::now() + std::time::Duration::from_secs(1),
@@ -81,7 +80,7 @@ mod tests {
             assert_eq!(1, client_calls.len());
             for call in client_calls {
                 call.stream_observer()
-                    .on_next(&Frame::new(codec::frame::OperationCode::Fetch))?;
+                    .on_next(&Frame::new(OperationCode::FETCH))?;
                 call.stream_observer().on_complete();
             }
         } else {

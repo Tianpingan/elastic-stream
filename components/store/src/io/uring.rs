@@ -1,6 +1,34 @@
+use std::collections::{BTreeMap, HashSet};
+use std::io;
+use std::sync::Arc;
+use std::time::Duration;
+use std::{
+    cell::{RefCell, UnsafeCell},
+    collections::{HashMap, VecDeque},
+    os::fd::AsRawFd,
+};
+
+use crossbeam::channel::{Receiver, TryRecvError};
+use io_uring::types::{SubmitArgs, Timespec};
+use io_uring::{opcode, squeue, types};
+use io_uring::{register, Parameters};
+use log::{debug, error, info, trace, warn};
+#[cfg(feature = "trace")]
+use minitrace::local::LocalCollector;
+use minitrace::local::LocalSpan;
+use minstant::Instant;
+use rustc_hash::{FxHashMap, FxHashSet};
+use tokio::sync::oneshot;
+
+use observation::metrics::uring_metrics::{
+    UringStatistics, COMPLETED_READ_IO, COMPLETED_WRITE_IO, INFLIGHT_IO, IO_DEPTH, PENDING_TASK,
+    READ_BYTES_TOTAL, READ_IO_LATENCY, WRITE_BYTES_TOTAL, WRITE_IO_LATENCY,
+};
+
 use crate::error::{AppendError, FetchError, StoreError};
 use crate::index::driver::IndexDriver;
 use crate::index::record_handle::{HandleExt, RecordHandle};
+use crate::index::Indexer;
 use crate::io::buf::{AlignedBufReader, AlignedBufWriter};
 use crate::io::context::Context;
 use crate::io::task::IoTask;
@@ -8,26 +36,6 @@ use crate::io::task::WriteTask;
 use crate::io::wal::Wal;
 use crate::io::write_window::WriteWindow;
 use crate::AppendResult;
-use io_uring::types::{SubmitArgs, Timespec};
-use minstant::Instant;
-use observation::metrics::uring_metrics::{
-    UringStatistics, COMPLETED_READ_IO, COMPLETED_WRITE_IO, INFLIGHT_IO, IO_DEPTH, PENDING_TASK,
-    READ_BYTES_TOTAL, READ_IO_LATENCY, WRITE_BYTES_TOTAL, WRITE_IO_LATENCY,
-};
-use std::io;
-
-use crossbeam::channel::{Receiver, Sender, TryRecvError};
-use io_uring::{opcode, squeue, types};
-use io_uring::{register, Parameters};
-use log::{debug, error, info, trace, warn};
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
-use std::{
-    cell::{RefCell, UnsafeCell},
-    collections::{HashMap, VecDeque},
-    os::fd::AsRawFd,
-};
-use tokio::sync::oneshot;
 
 use super::block_cache::{EntryRange, MergeRange};
 use super::buf::AlignedBuf;
@@ -56,15 +64,10 @@ pub(crate) struct IO {
     /// `Fallocate64`, for some unknown reason, is not working either.
     data_ring: io_uring::IoUring,
 
-    /// Sender of the IO task channel.
-    ///
-    /// Assumed to be taken by wrapping structs, which will offer APIs with semantics of choice.
-    pub(crate) sender: Option<Sender<IoTask>>,
-
     /// Receiver of the IO task channel.
     ///
     /// According to our design, there is only one instance.
-    receiver: Receiver<IoTask>,
+    sq_rx: Receiver<IoTask>,
 
     /// A WAL instance that manages the lifecycle of write-ahead-log segments.
     ///
@@ -107,18 +110,21 @@ pub(crate) struct IO {
     inflight_read_tasks: BTreeMap<u64, VecDeque<ReadTask>>,
 
     /// Offsets of blocks that are partially filled with data and are still inflight.
-    barrier: RefCell<HashSet<u64>>,
+    barrier: RefCell<FxHashSet<u64>>,
 
     /// Block the concurrent write IOs to the same page.
     /// The uring instance doesn't provide the ordering guarantee for the IOs,
     /// so we use this mechanism to avoid memory corruption.
-    blocked: HashMap<u64, (*mut Context, squeue::Entry)>,
+    blocked: FxHashMap<u64, (*mut Context, squeue::Entry)>,
 
     /// Collects the SQEs that need to be re-submitted.
     resubmit_sqes: VecDeque<squeue::Entry>,
 
     /// Provide index service for building read index, shared with the upper store layer.
     indexer: Arc<IndexDriver>,
+
+    /// Histogram of disk I/O time
+    disk_stats: super::disk_stats::DiskStats,
 }
 
 /// Check if required opcodes are supported by the host operation system.
@@ -142,7 +148,7 @@ fn check_io_uring(probe: &register::Probe, params: &Parameters) -> Result<(), St
 
     let codes = [
         opcode::OpenAt::CODE,
-        opcode::Fallocate64::CODE,
+        opcode::Fallocate::CODE,
         opcode::Write::CODE,
         opcode::Read::CODE,
         opcode::Close::CODE,
@@ -156,13 +162,6 @@ fn check_io_uring(probe: &register::Probe, params: &Parameters) -> Result<(), St
     Ok(())
 }
 
-/// A simple macro_rule to log amount of time used to await completion of submitted IO tasks.
-macro_rules! log_disk_perf {
-    ($level:tt, $task:ident, $elapsed:expr) => {
-        $level!("{} took {}ms", $task, $elapsed);
-    };
-}
-
 impl IO {
     /// Create new `IO` instance.
     ///
@@ -170,6 +169,7 @@ impl IO {
     pub(crate) fn new(
         config: &Arc<config::Configuration>,
         indexer: Arc<IndexDriver>,
+        sq_rx: crossbeam::channel::Receiver<IoTask>,
     ) -> Result<Self, StoreError> {
         let control_ring = io_uring::IoUring::builder().dontfork().build(32).map_err(|e| {
             error!("Failed to build I/O Uring instance for write-ahead-log segment file management: {:?}", e);
@@ -181,16 +181,19 @@ impl IO {
 
         // If polling is enabled, setup the iopoll and sqpoll flags
         if config.store.uring.polling {
+            info!("IO thread is in polling mode");
             data_ring_builder
                 .setup_iopoll()
                 .setup_sqpoll(config.store.uring.sqpoll_idle_ms)
                 .setup_sqpoll_cpu(config.store.uring.sqpoll_cpu);
+        } else {
+            info!("IO thread is in classic mode");
         }
 
         let data_ring = data_ring_builder
             .build(config.store.uring.queue_depth)
             .map_err(|e| {
-                error!("Failed to build polling I/O Uring instance: {:?}", e);
+                error!("Failed to build I/O Uring instance: {:?}", e);
                 StoreError::IoUring
             })?;
 
@@ -206,15 +209,12 @@ impl IO {
 
         check_io_uring(&probe, data_ring.params())?;
 
-        trace!("Polling I/O Uring instance created");
-
-        let (sender, receiver) = crossbeam::channel::unbounded();
+        trace!("I/O Uring instances created");
 
         Ok(Self {
             options: config.clone(),
             data_ring,
-            sender: Some(sender),
-            receiver,
+            sq_rx,
             write_window: WriteWindow::new(0),
             buf_writer: UnsafeCell::new(AlignedBufWriter::new(0, config.store.alignment)),
             wal: Wal::new(control_ring, config),
@@ -223,10 +223,11 @@ impl IO {
             pending_data_tasks: VecDeque::new(),
             inflight_write_tasks: BTreeMap::new(),
             inflight_read_tasks: BTreeMap::new(),
-            barrier: RefCell::new(HashSet::new()),
-            blocked: HashMap::new(),
+            barrier: RefCell::new(FxHashSet::default()),
+            blocked: FxHashMap::default(),
             resubmit_sqes: VecDeque::new(),
             indexer,
+            disk_stats: super::disk_stats::DiskStats::new(Duration::from_secs(1), u32::MAX as u64),
         })
     }
 
@@ -288,7 +289,12 @@ impl IO {
     }
 
     #[inline]
-    fn add_pending_task(&mut self, mut io_task: IoTask, received: &mut usize) {
+    fn add_pending_task(
+        &mut self,
+        mut io_task: IoTask,
+        received: &mut usize,
+        buffered: &mut usize,
+    ) {
         if !IO::validate_io_task(&mut io_task) {
             IO::on_bad_request(io_task);
             return;
@@ -301,6 +307,7 @@ impl IO {
                     write_task.stream_id,
                     write_task.offset
                 );
+                *buffered += write_task.buffer.len();
             }
             IoTask::Read(read_task) => {
                 trace!(
@@ -317,8 +324,10 @@ impl IO {
         *received += 1;
     }
 
+    #[minitrace::trace]
     fn receive_io_tasks(&mut self) -> usize {
         let mut received = 0;
+        let mut buffered = 0;
         let io_depth = self.data_ring.params().sq_entries() as usize;
         IO_DEPTH.set(io_depth as i64);
         loop {
@@ -343,6 +352,10 @@ impl IO {
             // Amazon EBS splits I/O operations larger than the maximum 256 KiB into smaller operations.
             // For example, if the I/O size is 500 KiB, Amazon EBS splits the operation into 2 IOPS.
             // The first one is 256 KiB and the second one is 244 KiB.
+            if buffered >= self.options.store.io_size {
+                break received;
+            }
+
             if self.inflight + received >= io_depth {
                 break received;
             }
@@ -357,9 +370,9 @@ impl IO {
             {
                 debug!("Block IO thread until IO tasks are received from channel");
                 // Block the thread until at least one IO task arrives
-                match self.receiver.recv() {
+                match self.sq_rx.recv() {
                     Ok(io_task) => {
-                        self.add_pending_task(io_task, &mut received);
+                        self.add_pending_task(io_task, &mut received, &mut buffered);
                     }
                     Err(_e) => {
                         info!("Channel for submitting IO task disconnected");
@@ -370,9 +383,9 @@ impl IO {
             } else {
                 // Poll IO-task channel in non-blocking manner for more tasks given that greater IO depth exploits potential of
                 // modern storage products like NVMe SSD.
-                match self.receiver.try_recv() {
+                match self.sq_rx.try_recv() {
                     Ok(io_task) => {
-                        self.add_pending_task(io_task, &mut received);
+                        self.add_pending_task(io_task, &mut received, &mut buffered);
                     }
                     Err(TryRecvError::Empty) => {
                         break received;
@@ -500,6 +513,7 @@ impl IO {
         Ok(())
     }
 
+    #[minitrace::trace]
     fn build_read_sqe(
         &mut self,
         entries: &mut Vec<squeue::Entry>,
@@ -548,7 +562,7 @@ impl IO {
                         );
 
                         let sqe = opcode::Read::new(types::Fd(sd.fd), ptr, read_len)
-                            .offset(read_from as libc::off_t)
+                            .offset(read_from)
                             .build()
                             .user_data(context as u64);
 
@@ -587,9 +601,9 @@ impl IO {
             .any(|(offset, _entry)| !self.barrier.borrow().contains(offset))
     }
 
+    #[minitrace::trace]
     fn build_write_sqe(&mut self, entries: &mut Vec<squeue::Entry>) {
         // Add previously blocked entries.
-
         self.blocked
             .extract_if(|offset, _entry| !self.barrier.borrow().contains(offset))
             .for_each(|(_, entry)| {
@@ -617,8 +631,9 @@ impl IO {
             });
 
         let writer = self.buf_writer.get_mut();
+        let slots = self.options.store.uring.queue_depth as usize - self.inflight;
         writer
-            .take()
+            .take(slots)
             .into_iter()
             .filter(|buf| {
                 // Accept the last partial buffer only if it contains uncommitted data.
@@ -664,7 +679,7 @@ impl IO {
 
                         // Note we have to write the whole page even if the page is partially filled.
                         let sqe = opcode::Write::new(types::Fd(sd.fd), ptr, buf_capacity)
-                            .offset64(file_offset as libc::off_t)
+                            .offset(file_offset)
                             .build()
                             .user_data(context as u64);
 
@@ -704,6 +719,7 @@ impl IO {
             .count();
     }
 
+    #[minitrace::trace]
     fn build_sqe(&mut self, entries: &mut Vec<squeue::Entry>) {
         let alignment = self.options.store.alignment;
         if let Err(e) = self.reserve_write_buffers() {
@@ -711,7 +727,7 @@ impl IO {
             return;
         }
 
-        let mut need_write = false;
+        let mut need_write = unsafe { &*self.buf_writer.get() }.buffering();
 
         // Try reclaim the cache space for the upcoming entries.
         let (_, free_bytes) = try_reclaim_from_wal(&mut self.wal, 0);
@@ -721,6 +737,7 @@ impl IO {
         let mut missed_entries: HashMap<u64, Vec<EntryRange>> = HashMap::new();
         let mut strong_referenced_entries: HashMap<u64, Vec<EntryRange>> = HashMap::new();
 
+        let span = LocalSpan::enter_with_local_parent("process_pending_task");
         'task_loop: while let Some(io_task) = self.pending_data_tasks.pop_front() {
             match io_task {
                 IoTask::Read(task) => {
@@ -853,6 +870,7 @@ impl IO {
                 }
             }
         }
+        drop(span);
         PENDING_TASK.set(self.pending_data_tasks.len() as i64);
         self.build_read_sqe(entries, missed_entries);
 
@@ -879,6 +897,7 @@ impl IO {
         });
     }
 
+    #[minitrace::trace]
     fn await_data_task_completion(&self) {
         if self.inflight == 0 {
             trace!("No inflight data task. Skip `await_data_task_completion`");
@@ -957,6 +976,7 @@ impl IO {
         }
     }
 
+    #[minitrace::trace]
     fn reap_data_tasks(&mut self) {
         if 0 == self.inflight {
             return;
@@ -983,21 +1003,13 @@ impl IO {
                     // Safety:
                     // It's safe to convert tag ptr back to Box<Context> as the memory pointed by ptr
                     // is allocated by Box itself, hence, there will no alignment issue at all.
-                    let mut context = unsafe { Box::from_raw(ptr) };
+                    let context = unsafe { Box::from_raw(ptr) };
                     let latency = context.start_time.elapsed();
 
                     // Log slow IO latency
                     if cqe.result() >= 0 {
-                        let elapsed = latency.as_millis();
-                        if elapsed <= 1 {
-                            log_disk_perf!(trace, context, elapsed);
-                        } else if elapsed <= 5 {
-                            log_disk_perf!(debug, context, elapsed);
-                        } else if elapsed <= 10 {
-                            log_disk_perf!(info, context, elapsed);
-                        } else {
-                            log_disk_perf!(warn, context, elapsed);
-                        }
+                        let elapsed = latency.as_micros();
+                        self.disk_stats.record(elapsed as u64);
                     }
 
                     match context.opcode {
@@ -1025,8 +1037,7 @@ impl IO {
                         trace!("Remove the barrier with wal_offset={}", context.wal_offset);
                     }
 
-                    if let Err(e) = on_complete(&mut self.write_window, &mut context, cqe.result())
-                    {
+                    if let Err(e) = on_complete(&mut self.write_window, &context, cqe.result()) {
                         match e {
                             StoreError::System(errno) => {
                                 error!(
@@ -1091,7 +1102,7 @@ impl IO {
                                                     buf_ptr,
                                                     context.len,
                                                 )
-                                                .offset(file_offset as libc::off_t)
+                                                .offset(file_offset)
                                                 .build()
                                                 .user_data(Box::into_raw(context) as u64);
 
@@ -1103,7 +1114,7 @@ impl IO {
                                                     buf_ptr,
                                                     buf.capacity as u32,
                                                 )
-                                                .offset64(file_offset as libc::off_t)
+                                                .offset(file_offset)
                                                 .build()
                                                 .user_data(Box::into_raw(context) as u64);
 
@@ -1209,7 +1220,7 @@ impl IO {
             ext: HandleExt::BatchSize(task.len),
         };
         self.indexer
-            .index(task.stream_id, task.range, task.offset as u64, handle);
+            .index(task.stream_id, task.range, task.offset, handle);
     }
 
     fn complete_read_tasks(&mut self, affected_segments: HashSet<u64>) {
@@ -1332,16 +1343,21 @@ impl IO {
         }
     }
 
+    /// Number of bytes that are not yet flushed to disk
+    fn buffered(&self) -> u64 {
+        unsafe { &*self.buf_writer.get() }.cursor - self.write_window.committed
+    }
+
     fn should_quit(&self) -> bool {
         0 == self.inflight
             && self.pending_data_tasks.is_empty()
-            && self.inflight_write_tasks.is_empty()
             && self.inflight_read_tasks.is_empty()
-            && self.blocked.is_empty()
             && self.wal.control_task_num() == 0
+            && self.buffered() == 0
             && self.channel_disconnected
     }
 
+    #[minitrace::trace]
     fn submit_data_tasks(&mut self, entries: &Vec<squeue::Entry>) -> Result<(), StoreError> {
         // Submit io_uring entries into submission queue.
         trace!(
@@ -1384,7 +1400,13 @@ impl IO {
 
         // Main loop
         loop {
+            // initiate the trace stack
+            #[cfg(feature = "trace")]
+            let trace_collector = LocalCollector::start();
+            let root = LocalSpan::enter_with_local_parent("io_loop");
+
             // Check if we need to create a new log segment
+            let build_segment_span = LocalSpan::enter_with_local_parent("build_segment");
             loop {
                 if io.borrow().wal.writable_segment_count() > min_preallocated_segment_files {
                     break;
@@ -1396,6 +1418,7 @@ impl IO {
             {
                 io.borrow_mut().wal.try_close_segment()?;
             }
+            drop(build_segment_span);
 
             let mut entries = vec![];
             {
@@ -1406,6 +1429,9 @@ impl IO {
                 trace!("Received {} IO requests from channel", cnt);
 
                 // Convert IO tasks into io_uring entries
+                //
+                // Note: even if `cnt` is 0, we still need to call `build_sqe` because
+                // `buf_writer` might have buffered some data due to queue-depth constraints.
                 io_mut.build_sqe(&mut entries);
             }
 
@@ -1435,6 +1461,20 @@ impl IO {
                 // Perform file operation
                 io_mut.wal.reap_control_tasks()?;
             }
+
+            // Report disk stats
+            let report_disk_stats_span = LocalSpan::enter_with_local_parent("report_disk_stats");
+            {
+                if io.borrow().disk_stats.is_ready() {
+                    io.borrow_mut()
+                        .disk_stats
+                        .report("Disk I/O Latency Statistics(us)");
+                }
+            }
+            drop(report_disk_stats_span);
+            drop(root);
+            #[cfg(feature = "trace")]
+            observation::trace::report_trace(trace_collector.collect());
         }
         info!("Main loop quit");
 
@@ -1468,7 +1508,7 @@ fn try_reclaim_from_wal(wal: &mut Wal, reclaim_bytes: u32) -> (u64, u64) {
 /// * `result` - Result code, exactly same to system call return value.
 fn on_complete(
     write_window: &mut WriteWindow,
-    context: &mut Context,
+    context: &Context,
     result: i32,
 ) -> Result<(), StoreError> {
     match context.opcode {
@@ -1542,38 +1582,43 @@ impl Drop for IO {
 
 #[cfg(test)]
 mod tests {
-    use super::{IoTask, WriteTask};
-    use crate::error::StoreError;
-    use crate::index::driver::IndexDriver;
-    use crate::index::MinOffset;
-    use crate::io::ReadTask;
-    use crate::offset_manager::WalOffsetManager;
-    use bytes::BytesMut;
-    use crossbeam::channel::Sender;
-    use log::{info, trace};
-    use model::record::flat_record::FlatRecordBatch;
-    use model::record::RecordBatchBuilder;
     use std::cell::RefCell;
     use std::error::Error;
     use std::io;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::thread::JoinHandle;
+
+    use bytes::BytesMut;
+    use crossbeam::channel::{Receiver, Sender};
+    use log::{info, trace};
     use tokio::sync::oneshot;
+
+    use model::record::flat_record::FlatRecordBatch;
+    use model::record::RecordBatchBuilder;
+
+    use crate::error::StoreError;
+    use crate::index::driver::IndexDriver;
+    use crate::index::{Indexer, MinOffset};
+    use crate::io::ReadTask;
+    use crate::offset_manager::WalOffsetManager;
+
+    use super::{IoTask, WriteTask};
 
     struct IOBuilder {
         cfg: config::Configuration,
+        sq_rx: Receiver<IoTask>,
     }
 
     impl IOBuilder {
-        fn new(store_dir: PathBuf) -> Self {
+        fn new(store_dir: PathBuf, sq_rx: Receiver<IoTask>) -> Self {
             let mut cfg = config::Configuration::default();
             cfg.store
                 .path
                 .set_base(store_dir.as_path().to_str().unwrap());
             cfg.check_and_apply()
                 .expect("Failed to check-and-apply configuration");
-            Self { cfg }
+            Self { cfg, sq_rx }
         }
 
         fn segment_size(mut self, segment_size: u64) -> Self {
@@ -1599,16 +1644,19 @@ mod tests {
                 128,
             )?);
 
-            super::IO::new(&config, indexer)
+            super::IO::new(&config, indexer, self.sq_rx)
         }
     }
 
-    fn create_default_io(store_dir: &Path) -> Result<super::IO, StoreError> {
-        IOBuilder::new(store_dir.to_path_buf()).build()
+    fn create_default_io(
+        store_dir: &Path,
+        sq_rx: Receiver<IoTask>,
+    ) -> Result<super::IO, StoreError> {
+        IOBuilder::new(store_dir.to_path_buf(), sq_rx).build()
     }
 
-    fn create_small_io(store_dir: &Path) -> Result<super::IO, StoreError> {
-        IOBuilder::new(store_dir.to_path_buf())
+    fn create_small_io(store_dir: &Path, sq_rx: Receiver<IoTask>) -> Result<super::IO, StoreError> {
+        IOBuilder::new(store_dir.to_path_buf(), sq_rx)
             .segment_size(1024 * 1024)
             .max_cache_size(1024 * 1024)
             .build()
@@ -1618,36 +1666,25 @@ mod tests {
         io_creator: IoCreator,
     ) -> Result<(JoinHandle<()>, Sender<IoTask>), Box<dyn Error>>
     where
-        IoCreator: Fn(&Path) -> Result<super::IO, StoreError> + Send + 'static,
+        IoCreator:
+            FnOnce(&Path, Receiver<IoTask>) -> Result<super::IO, StoreError> + Send + 'static,
     {
-        let (tx, rx) = oneshot::channel();
         let (recovery_completion_tx, recovery_completion_rx) = oneshot::channel();
-
+        let (sq_tx, sq_rx) = crossbeam::channel::unbounded();
         let handle = std::thread::spawn(move || {
             let tmp_dir = tempfile::tempdir().unwrap();
             let store_dir = tmp_dir.path();
-            let mut io = io_creator(store_dir).unwrap();
-
-            let sender = io
-                .sender
-                .take()
-                .ok_or(StoreError::Configuration("IO channel".to_owned()))
-                .unwrap();
-            let _ = tx.send(sender);
+            let io = io_creator(store_dir, sq_rx).unwrap();
             let io = RefCell::new(io);
-
             let _ = super::IO::run(io, recovery_completion_tx);
             info!("Module io stopped");
         });
 
-        if let Err(_) = recovery_completion_rx.blocking_recv() {
+        if recovery_completion_rx.blocking_recv().is_err() {
             panic!("Failed to await recovery completion");
         }
-        let sender: Sender<IoTask> = rx
-            .blocking_recv()
-            .map_err(|_| StoreError::Internal("Internal error".to_owned()))?;
 
-        return Ok((handle, sender));
+        Ok((handle, sq_tx))
     }
 
     #[test]
@@ -1655,27 +1692,26 @@ mod tests {
         crate::log::try_init_log();
         let tmp_dir = tempfile::tempdir()?;
         let store_dir = tmp_dir.path();
-        let mut io = create_default_io(store_dir)?;
-        let sender = io.sender.take().unwrap();
+        let (sq_tx, sq_rx) = crossbeam::channel::unbounded();
+        let (cq_tx, _cq_rx) = crossbeam::channel::unbounded();
+        let mut io = create_default_io(store_dir, sq_rx)?;
         let mut buffer = BytesMut::with_capacity(128);
         buffer.resize(128, 65);
         let buffer = buffer.freeze();
 
         // Send IoTask to channel
         (0..16)
-            .into_iter()
             .flat_map(|_| {
-                let (tx, _rx) = oneshot::channel();
                 let io_task = IoTask::Write(WriteTask {
                     stream_id: 0,
                     range: 0,
                     offset: 0,
                     len: 1,
                     buffer: buffer.clone(),
-                    observer: tx,
+                    observer: cq_tx.clone(),
                     written_len: None,
                 });
-                sender.send(io_task)
+                sq_tx.send(io_task)
             })
             .count();
 
@@ -1683,15 +1719,15 @@ mod tests {
         assert_eq!(16, io.pending_data_tasks.len());
         io.pending_data_tasks.clear();
 
-        drop(sender);
+        drop(sq_tx);
 
         // Mock that some in-flight IO tasks were reaped
         io.inflight = 0;
 
         io.receive_io_tasks();
 
-        assert_eq!(true, io.pending_data_tasks.is_empty());
-        assert_eq!(true, io.channel_disconnected);
+        assert!(io.pending_data_tasks.is_empty());
+        assert!(io.channel_disconnected);
 
         Ok(())
     }
@@ -1705,9 +1741,10 @@ mod tests {
     fn test_reserve_write_buffers() -> Result<(), Box<dyn Error>> {
         crate::log::try_init_log();
         let store_path = tempfile::tempdir()?;
-
+        let (_sq_tx, sq_rx) = crossbeam::channel::unbounded();
+        let (cq_tx, _cq_rx) = crossbeam::channel::unbounded();
         let file_size = 1024 * 1024;
-        let mut io = IOBuilder::new(store_path.path().to_path_buf())
+        let mut io = IOBuilder::new(store_path.path().to_path_buf(), sq_rx)
             .segment_size(file_size)
             .max_cache_size(file_size)
             .build()?;
@@ -1722,14 +1759,13 @@ mod tests {
         let bytes = bytes.freeze();
 
         for _ in 0..4 {
-            let (tx, _rx) = oneshot::channel();
             let write_task = WriteTask {
                 stream_id: 0,
                 range: 0,
                 offset: 0,
                 len: 1,
                 buffer: bytes.clone(),
-                observer: tx,
+                observer: cq_tx.clone(),
                 written_len: None,
             };
             let task = IoTask::Write(write_task);
@@ -1743,14 +1779,13 @@ mod tests {
         assert_eq!(0, buf_writer.cursor);
 
         for _ in 0..4 {
-            let (tx, _rx) = oneshot::channel();
             let write_task = WriteTask {
                 stream_id: 0,
                 range: 0,
                 offset: 0,
                 len: 1,
                 buffer: bytes.clone(),
-                observer: tx,
+                observer: cq_tx.clone(),
                 written_len: None,
             };
             let task = IoTask::Write(write_task);
@@ -1764,14 +1799,13 @@ mod tests {
         assert_eq!(0, buf_writer.cursor);
 
         for _ in 0..1024 {
-            let (tx, _rx) = oneshot::channel();
             let write_task = WriteTask {
                 stream_id: 0,
                 range: 0,
                 offset: 0,
                 len: 1,
                 buffer: bytes.clone(),
-                observer: tx,
+                observer: cq_tx.clone(),
                 written_len: None,
             };
             let task = IoTask::Write(write_task);
@@ -1794,7 +1828,9 @@ mod tests {
         crate::log::try_init_log();
         let tmp_dir = tempfile::tempdir()?;
         let store_dir = tmp_dir.path();
-        let mut io = create_default_io(store_dir)?;
+        let (_sq_tx, sq_rx) = crossbeam::channel::unbounded();
+        let (_cq_tx, _cq_rx) = crossbeam::channel::unbounded();
+        let mut io = create_default_io(store_dir, sq_rx)?;
 
         io.wal.open_segment_directly()?;
 
@@ -1805,16 +1841,14 @@ mod tests {
 
         // Send IoTask to channel
         (0..16)
-            .into_iter()
             .map(|n| {
-                let (tx, _rx) = oneshot::channel();
                 IoTask::Write(WriteTask {
                     stream_id: 0,
                     range: 0,
                     offset: n,
                     len: 1,
                     buffer: buffer.clone(),
-                    observer: tx,
+                    observer: _cq_tx.clone(),
                     written_len: None,
                 })
             })
@@ -1834,7 +1868,6 @@ mod tests {
         crate::log::try_init_log();
         let (handle, sender) = create_and_run_io(create_default_io)?;
         let records: Vec<_> = (0..16)
-            .into_iter()
             .map(|_| {
                 let mut rng = rand::thread_rng();
                 let random_size = rand::Rng::gen_range(&mut rng, 2..128);
@@ -1856,7 +1889,6 @@ mod tests {
         // Will cost at least 4K * 1024 = 4M bytes, which means at least 4 segments will be allocated
         // And the cache reclaim will be triggered since a small io only has 1M cache
         let records: Vec<_> = (0..4096)
-            .into_iter()
             .map(|_| {
                 let mut rng = rand::thread_rng();
                 let random_size = rand::Rng::gen_range(&mut rng, 4096..8192);
@@ -1883,36 +1915,25 @@ mod tests {
     #[test]
     fn test_recover() -> Result<(), Box<dyn Error>> {
         crate::log::try_init_log();
-        let (tx, rx) = oneshot::channel();
         let tmp_dir = tempfile::tempdir()?;
         let store_dir = tmp_dir.path();
         // Delete the directory after restart and verification of `recover`.
         let store_path = store_dir.as_os_str().to_os_string();
 
         let (recovery_completion_tx, recovery_completion_rx) = oneshot::channel();
-
+        let (sq_tx, sq_rx) = crossbeam::channel::unbounded();
         let handle = std::thread::spawn(move || {
             let store_dir = Path::new(&store_path);
-            let mut io = create_default_io(store_dir).unwrap();
-            let sender = io
-                .sender
-                .take()
-                .ok_or(StoreError::Configuration("IO channel".to_owned()))
-                .unwrap();
-            let _ = tx.send(sender);
+            let io = create_default_io(store_dir, sq_rx).unwrap();
             let io = RefCell::new(io);
 
             let _ = super::IO::run(io, recovery_completion_tx);
             info!("Module io stopped");
         });
 
-        if let Err(_) = recovery_completion_rx.blocking_recv() {
+        if recovery_completion_rx.blocking_recv().is_err() {
             panic!("Failed to wait store recovery completion");
         }
-
-        let sender = rx
-            .blocking_recv()
-            .map_err(|_| StoreError::Internal("Internal error".to_owned()))?;
 
         let mut payload = BytesMut::with_capacity(1024);
         payload.resize(1024, 65);
@@ -1933,19 +1954,18 @@ mod tests {
         let buffer = buffer.freeze();
         assert_eq!(buffer.len(), total as usize);
 
-        let records: Vec<_> = (0..16).into_iter().map(|_| buffer.clone()).collect();
-
-        send_and_receive_with_records(sender.clone(), 0, 0, records);
-
-        drop(sender);
+        let records: Vec<_> = (0..16).map(|_| buffer.clone()).collect();
+        send_and_receive_with_records(sq_tx.clone(), 0, 0, records);
+        drop(sq_tx);
         handle.join().map_err(|_| StoreError::AllocLogSegment)?;
 
         {
-            let mut io = create_default_io(store_dir).unwrap();
+            let (_sq_tx, sq_rx) = crossbeam::channel::unbounded();
+            let mut io = create_default_io(store_dir, sq_rx).unwrap();
             io.load()?;
             let pos = io.indexer.get_wal_checkpoint()?;
             io.recover(pos)?;
-            assert!(!io.buf_writer.get_mut().take().is_empty());
+            assert!(!io.buf_writer.get_mut().take(1024).is_empty());
         }
 
         Ok(())
@@ -1955,25 +1975,26 @@ mod tests {
     fn test_multiple_run_with_random_bytes() -> Result<(), Box<dyn Error>> {
         crate::log::try_init_log();
         let (handle, sender) = create_and_run_io(create_small_io)?;
-        let mut records: Vec<_> = vec![];
-        records.push(create_random_bytes(4096 - 8));
-        records.push(create_random_bytes(4096 - 8));
-        records.push(create_random_bytes(4096 - 8));
-        records.push(create_random_bytes(4096));
-        records.push(create_random_bytes(4096 - 8 - 8));
-        records.push(create_random_bytes(4096 - 8));
-        records.push(create_random_bytes(4096 - 8 - 24));
+        let records: Vec<_> = vec![
+            create_random_bytes(4096 - 8),
+            create_random_bytes(4096 - 8),
+            create_random_bytes(4096 - 8),
+            create_random_bytes(4096),
+            create_random_bytes(4096 - 8 - 8),
+            create_random_bytes(4096 - 8),
+            create_random_bytes(4096 - 8 - 24),
+        ];
         send_and_receive_with_records(sender.clone(), 0, 0, records);
-        let mut records: Vec<_> = vec![];
-        records.push(create_random_bytes(4096 - 8));
+        let records: Vec<_> = vec![create_random_bytes(4096 - 8)];
         send_and_receive_with_records(sender.clone(), 0, 7, records);
-        let mut records: Vec<_> = vec![];
-        records.push(create_random_bytes(4096 - 8));
-        records.push(create_random_bytes(4096 - 8));
-        records.push(create_random_bytes(4096));
-        records.push(create_random_bytes(4096 - 8 - 8));
-        records.push(create_random_bytes(4096 - 8));
-        records.push(create_random_bytes(4096 - 8 - 24));
+        let records: Vec<_> = vec![
+            create_random_bytes(4096 - 8),
+            create_random_bytes(4096 - 8),
+            create_random_bytes(4096),
+            create_random_bytes(4096 - 8 - 8),
+            create_random_bytes(4096 - 8),
+            create_random_bytes(4096 - 8 - 24),
+        ];
         send_and_receive_with_records(sender.clone(), 0, 8, records);
         drop(sender);
         handle.join().map_err(|_| StoreError::AllocLogSegment)?;
@@ -1986,7 +2007,7 @@ mod tests {
         let (handle, sender) = create_and_run_io(create_small_io)?;
         let mut records: Vec<_> = vec![];
         let count = 1000;
-        (0..count).into_iter().for_each(|_| {
+        (0..count).for_each(|_| {
             let mut rng = rand::thread_rng();
             let random_size = rand::Rng::gen_range(&mut rng, 1000..9000);
             records.push(create_random_bytes(random_size));
@@ -2000,24 +2021,22 @@ mod tests {
 
     fn send_and_receive_with_records(
         sender: crossbeam::channel::Sender<IoTask>,
-        stream_id: i64,
-        start_offset: i64,
+        stream_id: u64,
+        start_offset: u64,
         records: Vec<bytes::Bytes>,
     ) {
-        let mut receivers = vec![];
+        let (cq_tx, cq_rx) = crossbeam::channel::unbounded();
         records
             .iter()
             .enumerate()
             .map(|(i, buf)| {
-                let (tx, rx) = oneshot::channel();
-                receivers.push(rx);
                 IoTask::Write(WriteTask {
-                    stream_id: stream_id,
+                    stream_id,
                     range: 0,
-                    offset: start_offset + i as i64,
+                    offset: start_offset + i as u64,
                     len: 1,
                     buffer: buf.clone(),
-                    observer: tx,
+                    observer: cq_tx.clone(),
                     written_len: None,
                 })
             })
@@ -2026,8 +2045,8 @@ mod tests {
             });
 
         let mut results = Vec::new();
-        for receiver in receivers {
-            let res = receiver.blocking_recv().unwrap().unwrap();
+        while let Ok(res) = cq_rx.recv() {
+            let res = res.unwrap();
             trace!(
                 "{{ stream-id: {}, offset: {} , wal_offset: {}}}",
                 res.stream_id,
@@ -2035,6 +2054,9 @@ mod tests {
                 res.wal_offset
             );
             results.push(res);
+            if results.len() >= records.len() {
+                break;
+            }
         }
 
         // Read the data from store

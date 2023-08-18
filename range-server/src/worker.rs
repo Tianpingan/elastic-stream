@@ -1,26 +1,27 @@
-use std::{
-    cell::{RefCell, UnsafeCell},
-    error::Error,
-    rc::Rc,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-
 use crate::{
     connection_tracker::ConnectionTracker,
-    range_manager::{fetcher::FetchRangeTask, RangeManager},
+    heartbeat::Heartbeat,
+    metadata::{MetadataManager, MetadataWatcher},
+    range_manager::RangeManager,
     worker_config::WorkerConfig,
 };
-use client::Client;
+use client::{client::Client, DefaultClient};
 use log::{debug, error, info, warn};
-use model::client_role::ClientRole;
 use observation::metrics::{
     store_metrics::RangeServerStatistics,
     sys_metrics::{DiskStatistics, MemoryStatistics},
     uring_metrics::UringStatistics,
 };
-use store::Store;
-use tokio::sync::{broadcast, mpsc};
+use pd_client::PlacementDriverClient;
+use protocol::rpc::header::RangeServerState;
+use std::{
+    cell::RefCell,
+    error::Error,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::broadcast;
 use tokio_uring::net::TcpListener;
 use util::metrics::http_serve;
 
@@ -31,37 +32,53 @@ use util::metrics::http_serve;
 /// and communication with the placement driver.
 ///
 /// Inter-worker communications are achieved via channels.
-pub(crate) struct Worker<S, M> {
+pub(crate) struct Worker<M, W, Meta> {
     config: WorkerConfig,
-    store: Rc<S>,
-    range_manager: Rc<UnsafeCell<M>>,
-    client: Rc<Client>,
-    #[allow(dead_code)]
-    channels: Option<Vec<mpsc::UnboundedReceiver<FetchRangeTask>>>,
+    range_manager: Rc<M>,
+    client: Rc<DefaultClient>,
+
+    /// `MetadataWatcher` is having a `PlacementDriverClient` embedded in, which lists and watches
+    /// resources of interest.
+    ///
+    /// Once the watcher fetches a set of resource events, it dispatches them to all metadata managers
+    /// per worker through MPSC channels.
+    metadata_watcher: Option<W>,
+
+    /// `MetadataManager` caches all relevant metadata it receives and notifies all registered observers.
+    metadata_manager: Meta,
+
+    state: Rc<RefCell<RangeServerState>>,
 }
 
-impl<S, M> Worker<S, M>
+impl<M, W, Meta> Worker<M, W, Meta>
 where
-    S: Store + 'static,
     M: RangeManager + 'static,
+    W: MetadataWatcher + 'static,
+    Meta: MetadataManager + 'static,
 {
     pub fn new(
         config: WorkerConfig,
-        store: Rc<S>,
-        range_manager: Rc<UnsafeCell<M>>,
-        client: Rc<Client>,
-        channels: Option<Vec<mpsc::UnboundedReceiver<FetchRangeTask>>>,
+        range_manager: Rc<M>,
+        client: Rc<DefaultClient>,
+        metadata_watcher: Option<W>,
+        metadata_manager: Meta,
     ) -> Self {
         Self {
             config,
-            store,
             range_manager,
             client,
-            channels,
+            metadata_watcher,
+            metadata_manager,
+            state: Rc::new(RefCell::new(
+                RangeServerState::RANGE_SERVER_STATE_READ_WRITE,
+            )),
         }
     }
 
-    pub fn serve(&mut self, shutdown: broadcast::Sender<()>) {
+    pub fn serve<P>(&mut self, pd_client: Box<P>, shutdown: broadcast::Sender<()>)
+    where
+        P: PlacementDriverClient + 'static,
+    {
         core_affinity::set_for_current(self.config.core_id);
         if self.config.primary {
             info!(
@@ -84,7 +101,16 @@ where
                     .setup_attach_wq(self.config.sharing_uring),
             )
             .start(async {
-                let bind_address = format!("0.0.0.0:{}", self.config.server_config.server.port);
+                // Run dispatching service of Store.
+                if let Some(ref mut watcher) = self.metadata_watcher {
+                    watcher.start(pd_client);
+                }
+
+                self.metadata_manager.start().await;
+
+                self.range_manager.start().await;
+
+                let bind_address = &self.config.server_config.server.addr;
                 let listener =
                     match TcpListener::bind(bind_address.parse().expect("Failed to bind")) {
                         Ok(listener) => {
@@ -97,11 +123,6 @@ where
                         }
                     };
 
-                unsafe { &mut *self.range_manager.get() }
-                    .start()
-                    .await
-                    .expect("Failed to bootstrap stream ranges from placement drivers");
-
                 if self.config.primary {
                     let port = self.config.server_config.observation.metrics.port;
                     let host = self.config.server_config.observation.metrics.host.clone();
@@ -111,7 +132,10 @@ where
                     self.report_metrics(shutdown.subscribe());
                 }
 
-                self.heartbeat(shutdown.subscribe());
+                // TODO: report after pd can handle the request.
+                // self.report_range_progress(shutdown.subscribe());
+
+                self.heartbeat(shutdown.clone(), Rc::clone(&self.state));
 
                 match self.run(listener, shutdown.subscribe()).await {
                     Ok(_) => {}
@@ -121,9 +145,11 @@ where
                 }
             });
     }
+
     fn report_metrics(&self, mut shutdown_rx: broadcast::Receiver<()>) {
         let client = Rc::clone(&self.client);
         let config = Arc::clone(&self.config.server_config);
+        let state = Rc::clone(&self.state);
         tokio_uring::spawn(async move {
             // TODO: Modify it to client report metrics interval, instead of config.client_heartbeat_interval()
             let mut interval = tokio::time::interval(config.client_heartbeat_interval());
@@ -142,8 +168,10 @@ where
                         range_server_statistics.record();
                         disk_statistics.record();
                         memory_statistics.record();
+                        let state = *state.borrow();
                         let _ = client
-                        .report_metrics(&config.placement_driver, &uring_statistics,&range_server_statistics, &disk_statistics, &memory_statistics)
+                        .report_metrics(
+                            &config.placement_driver, state, &uring_statistics, &range_server_statistics, &disk_statistics, &memory_statistics)
                         .await;
                     }
 
@@ -152,23 +180,30 @@ where
         });
     }
 
-    fn heartbeat(&self, mut shutdown_rx: broadcast::Receiver<()>) {
+    fn heartbeat(&self, shutdown: broadcast::Sender<()>, state: Rc<RefCell<RangeServerState>>) {
         let client = Rc::clone(&self.client);
         let config = Arc::clone(&self.config.server_config);
+        let heartbeat = Heartbeat::new(client, config, state, shutdown);
+        heartbeat.run();
+    }
+
+    #[allow(dead_code)]
+    fn report_range_progress(&self, mut shutdown_rx: broadcast::Receiver<()>) {
+        let client = self.client.clone();
+        let config = Arc::clone(&self.config.server_config);
+        let range_manager = self.range_manager.clone();
         tokio_uring::spawn(async move {
             let mut interval = tokio::time::interval(config.client_heartbeat_interval());
             loop {
                 tokio::select! {
                     _ = shutdown_rx.recv() => {
-                        info!("Received shutdown signal. Stop accepting new connections.");
+                        info!("Received shutdown signal. Stop report range progress.");
                         break;
                     }
-                    _ = interval.tick() => {
-                        let _ = client
-                        .broadcast_heartbeat(ClientRole::RangeServer)
-                        .await;
+                    _  = interval.tick() => {
+                        let range_progress = range_manager.get_range_progress().await;
+                        let _ = client.report_range_progress(range_progress).await;
                     }
-
                 }
             }
         });
@@ -210,7 +245,6 @@ where
                     let session = super::session::Session::new(
                         Arc::clone(&self.config.server_config),
                         stream, peer_socket_address,
-                        Rc::clone(&self.store),
                         Rc::clone(&self.range_manager),
                         Rc::clone(&connection_tracker)
                        );

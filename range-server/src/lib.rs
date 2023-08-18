@@ -1,10 +1,12 @@
 #![feature(result_option_inspect)]
 #![feature(try_find)]
 #![feature(hash_extract_if)]
+#![feature(extract_if)]
 #![feature(btree_extract_if)]
 #![feature(async_fn_in_trait)]
+#![feature(ip)]
 
-pub(crate) mod cli;
+pub mod cli;
 pub(crate) mod connection_tracker;
 mod delegate_task;
 pub mod error;
@@ -15,6 +17,8 @@ mod worker;
 mod worker_config;
 pub use crate::cli::Cli;
 pub(crate) mod connection_handler;
+pub(crate) mod heartbeat;
+pub(crate) mod metadata;
 mod metrics;
 pub(crate) mod profiling;
 pub(crate) mod session;

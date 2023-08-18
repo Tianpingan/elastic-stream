@@ -9,32 +9,11 @@ defaults:
     working-directory: ./pd
 
 jobs:
-  flatc:
-    name: Verify Flatbuffers
-    strategy:
-      matrix:
-        platform: [ "ubuntu-latest" ]
-    runs-on: ${{ matrix.platform }}
-    timeout-minutes: 5
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
-      - name: Install Flatbuffers
-        run: |
-          wget -O flatc.zip https://github.com/google/flatbuffers/releases/download/v23.3.3/Linux.flatc.binary.g++-10.zip
-          unzip flatc.zip
-          sudo mv flatc /usr/local/bin
-          rm flatc.zip
-          flatc --version
-      - name: Verify Flatbuffers
-        run: |
-          make flatc
-          git diff --exit-code
   lint:
     name: Lint
     strategy:
       matrix:
-        go-version: [ "1.20" ]
+        go-version: [ "1.21" ]
         platform: [ "ubuntu-latest" ]
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 10
@@ -49,13 +28,16 @@ jobs:
           restore-keys: |
             ${{matrix.platform}}-${{matrix.go-version}}-pd-lint-
             ${{matrix.platform}}-${{matrix.go-version}}-pd-
+      - name: Install flatc
+        run: |
+          sudo ../scripts/try_install_flatc.sh
       - name: Lint
         run: make lint GO_VERSION=${{ matrix.go-version }}
   crossbuild:
     name: Cross Build
     strategy:
       matrix:
-        go-version: [ "1.19", "1.20" ]
+        go-version: [ "1.20", "1.21" ]
         platform: [ "ubuntu-latest" ]
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 30
@@ -70,13 +52,16 @@ jobs:
           restore-keys: |
             ${{matrix.platform}}-${{matrix.go-version}}-pd-build-
             ${{matrix.platform}}-${{matrix.go-version}}-pd-
+      - name: Install flatc
+        run: |
+          sudo ../scripts/try_install_flatc.sh
       - name: Build containers
         run: make all-container GO_VERSION=${{ matrix.go-version }}
   test:
     name: Test
     strategy:
       matrix:
-        go-version: [ "1.19", "1.20" ]
+        go-version: [ "1.20", "1.21" ]
         platform: [ "ubuntu-latest" ]
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 10
@@ -91,5 +76,15 @@ jobs:
           restore-keys: |
             ${{matrix.platform}}-${{matrix.go-version}}-pd-test-
             ${{matrix.platform}}-${{matrix.go-version}}-pd-
+      - name: Install flatc
+        run: |
+          sudo ../scripts/try_install_flatc.sh
       - name: Test
         run: make test GOFLAGS="-v" GO_VERSION=${{ matrix.go-version }} GO_TEST_FLAGS="-coverprofile=covprofile -covermode=atomic -coverpkg=./..."
+      - name: Upload coverage
+        uses: codecov/codecov-action@v2
+        with:
+          files: ./pd/covprofile
+          fail_ci_if_error: true
+          verbose: true
+          version: "v0.1.15"

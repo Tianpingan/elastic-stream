@@ -1,0 +1,29 @@
+[package]
+name = "pd-client"
+edition = "2021"
+version = { workspace = true }
+authors = { workspace = true }
+description = { workspace = true }
+license = { workspace = true }
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+client = { path = "../client" }
+log = { workspace = true }
+mockall = { workspace = true, optional = true }
+model = { path = "../model" }
+protocol = { path = "../protocol" }
+tokio = { workspace = true }
+tokio-uring = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+config = { path = "../config" }
+env_logger = { workspace = true }
+mock-server = { path = "../mock-server" }
+mockall = { workspace = true }
+ulog = { path = "../ulog", features = ["env"] }
+
+[features]
+default = []
+mock = ["mockall"]

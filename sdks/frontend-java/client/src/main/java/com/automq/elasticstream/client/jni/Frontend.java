@@ -16,7 +16,8 @@ public class Frontend extends ElasticStreamObject {
     }
 
     private static void loadNativeLibrary() {
-        String sharedLibName = "frontend";
+        String sharedLibName = "frontend" + '_' + PlatformDependent.normalizedOs() + '_'
+                + PlatformDependent.normalizedArch();
         ClassLoader cl = PlatformDependent.getClassLoader(Native.class);
         try {
             NativeLibraryLoader.load(sharedLibName, cl);
@@ -30,7 +31,7 @@ public class Frontend extends ElasticStreamObject {
         this.ptr = getFrontend(access_point);
     }
     public CompletableFuture<Long> create(int replica, int ack, long retention_millis) {
-        CompletableFuture<Long> future = new CompletableFuture<>(); 
+        CompletableFuture<Long> future = new CompletableFuture<>();
         create(this.ptr, replica, ack, retention_millis, future);
         return future;
     }

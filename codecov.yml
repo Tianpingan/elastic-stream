@@ -1,0 +1,30 @@
+codecov:
+  token: 14d9c2d5-0c86-4623-8f3c-08d069667b7c
+
+ignore:
+  - "pd/pkg/util/testutil/"
+  - "pd/api/"
+  - "pd/third_party/"
+
+comment:
+  layout: "reach, diff, flags, components, tree, reach"
+  behavior: default
+
+component_management:
+  individual_components:
+    - component_id: "rust-components"
+      name: "Rust Components"
+      paths:
+        - "components/"
+    - component_id: "rust-sdk"
+      name: "Rust SDK"
+      paths:
+        - "sdks/frontend-rs/"
+    - component_id: "range-server"
+      name: "Range Server"
+      paths:
+        - "range-server/"
+    - component_id: "pd"
+      name: "Placement Driver"
+      paths:
+        - "pd/"

@@ -1,0 +1,30 @@
+[package]
+name = "object-storage"
+version = { workspace = true }
+authors = { workspace = true }
+description = { workspace = true }
+license = { workspace = true }
+edition = "2021"
+
+[dependencies]
+bytes = { workspace = true }
+clap = { workspace = true }
+client = { path = "../client" }
+config = { path = "../config" }
+env_logger = { workspace = true }
+flatbuffers = { workspace = true }
+log = { workspace = true }
+mockall = { workspace = true }
+model = { path = "../model" }
+observation = { path = "../observation" }
+opendal = { workspace = true }
+pd-client = { path = "../pd-client" }
+protocol = { path = "../protocol" }
+store = { path = "../store" }
+tokio = { workspace = true }
+tokio-uring = { workspace = true }
+tokio-util = { workspace = true }
+util = { path = "../util" }
+
+[dev-dependencies]
+pd-client = { path = "../pd-client", features = ["mock"] }

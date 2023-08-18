@@ -4,33 +4,39 @@ use std::{
     thread::{sleep, Builder, JoinHandle},
 };
 
-use crate::{error::StoreError, index::LocalRangeManager};
+use crate::{
+    error::StoreError,
+    index::{cleaner::LogCleaner, LocalRangeManager},
+};
 use config::Configuration;
 use crossbeam::channel::{self, Receiver, Select, Sender, TryRecvError};
 use log::{error, info, warn};
-use model::range::RangeMetadata;
+use model::{
+    error::EsError,
+    range::{RangeEvent, RangeMetadata},
+};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{indexer::Indexer, record_handle::RecordHandle, MinOffset};
+use super::{indexer::DefaultIndexer, record_handle::RecordHandle, Indexer, MinOffset};
 
 pub(crate) struct IndexDriver {
     tx: Sender<IndexCommand>,
     // Issue a shutdown signal to the driver thread.
     shutdown_tx: Sender<()>,
-    indexer: Arc<Indexer>,
+    indexer: Arc<DefaultIndexer>,
     handles: Vec<JoinHandle<()>>,
 }
 
 pub(crate) enum IndexCommand {
     Index {
-        stream_id: i64,
+        stream_id: u64,
         range: u32,
         offset: u64,
         handle: RecordHandle,
     },
     /// Used to retrieve a batch of record handles from a given offset.
     ScanRecord {
-        stream_id: i64,
+        stream_id: u64,
         range: u32,
         offset: u64,
         max_offset: u64,
@@ -43,7 +49,7 @@ pub(crate) enum IndexCommand {
     },
 
     ListRangeByStream {
-        stream_id: i64,
+        stream_id: u64,
         tx: mpsc::UnboundedSender<RangeMetadata>,
     },
 
@@ -56,6 +62,10 @@ pub(crate) enum IndexCommand {
         range: RangeMetadata,
         tx: oneshot::Sender<Result<(), StoreError>>,
     },
+    RangeEvent {
+        events: Vec<RangeEvent>,
+        tx: oneshot::Sender<u64>,
+    },
 }
 
 impl IndexDriver {
@@ -66,7 +76,7 @@ impl IndexDriver {
     ) -> Result<Self, StoreError> {
         let (tx, rx) = channel::unbounded();
         let (shutdown_tx, shutdown_rx) = channel::bounded(1);
-        let indexer = Arc::new(Indexer::new(config, min_offset, flush_threshold)?);
+        let indexer = Arc::new(DefaultIndexer::new(config, min_offset, flush_threshold)?);
         let runner = IndexDriverRunner::new(rx, shutdown_rx, Arc::clone(&indexer));
         // Always bind indexer thread to processor-0, which runs miscellaneous tasks.
         let core = core_affinity::CoreId { id: 0 };
@@ -88,7 +98,7 @@ impl IndexDriver {
         })
     }
 
-    pub(crate) fn index(&self, stream_id: i64, range: u32, offset: u64, handle: RecordHandle) {
+    pub(crate) fn index(&self, stream_id: u64, range: u32, offset: u64, handle: RecordHandle) {
         if let Err(_e) = self.tx.send(IndexCommand::Index {
             stream_id,
             range,
@@ -101,7 +111,7 @@ impl IndexDriver {
 
     pub(crate) fn scan_record_handles(
         &self,
-        stream_id: i64,
+        stream_id: u64,
         range: u32,
         offset: u64,
         max_offset: u64,
@@ -128,7 +138,7 @@ impl IndexDriver {
 
     pub(crate) fn list_ranges_by_stream(
         &self,
-        stream_id: i64,
+        stream_id: u64,
         tx: mpsc::UnboundedSender<RangeMetadata>,
     ) {
         if let Err(_e) = self
@@ -184,6 +194,18 @@ impl IndexDriver {
             let _ = handle.join();
         }
     }
+
+    pub(crate) async fn handle_range_event(&self, events: Vec<RangeEvent>) -> Result<u64, EsError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(IndexCommand::RangeEvent { events, tx })
+            .map_err(|e| {
+                EsError::unexpected("Cannot send command to index driver").set_source(e)
+            })?;
+        rx.await.map_err(|e| {
+            EsError::unexpected("handle_range_event cannot get response from rx").set_source(e)
+        })
+    }
 }
 
 impl Drop for IndexDriver {
@@ -193,7 +215,7 @@ impl Drop for IndexDriver {
 }
 
 impl Deref for IndexDriver {
-    type Target = Arc<Indexer>;
+    type Target = Arc<DefaultIndexer>;
 
     fn deref(&self) -> &Self::Target {
         &self.indexer
@@ -203,11 +225,15 @@ impl Deref for IndexDriver {
 struct IndexDriverRunner {
     rx: Receiver<IndexCommand>,
     shutdown_rx: Receiver<()>,
-    indexer: Arc<Indexer>,
+    indexer: Arc<DefaultIndexer>,
 }
 
 impl IndexDriverRunner {
-    fn new(rx: Receiver<IndexCommand>, shutdown_rx: Receiver<()>, indexer: Arc<Indexer>) -> Self {
+    fn new(
+        rx: Receiver<IndexCommand>,
+        shutdown_rx: Receiver<()>,
+        indexer: Arc<DefaultIndexer>,
+    ) -> Self {
         Self {
             rx,
             shutdown_rx,
@@ -219,6 +245,7 @@ impl IndexDriverRunner {
         let mut selector = Select::new();
         selector.recv(&self.rx);
         selector.recv(&self.shutdown_rx);
+        let mut log_cleaner = LogCleaner::new(self.indexer.clone());
         loop {
             let index = selector.ready();
             if 0 == index {
@@ -230,12 +257,18 @@ impl IndexDriverRunner {
                             offset,
                             handle,
                         } => {
+                            let physical_offset = handle.wal_offset;
                             while let Err(e) = self.indexer.index(stream_id, range, offset, &handle)
                             {
                                 error!("Failed to index: stream_id={}, offset={}, record_handle={:?}, cause: {}",
                                 stream_id, offset, handle, e);
                                 sleep(std::time::Duration::from_millis(100));
                             }
+                            log_cleaner.handle_new_index(
+                                (stream_id, range),
+                                offset,
+                                physical_offset,
+                            );
                         }
                         IndexCommand::ScanRecord {
                             stream_id,
@@ -246,9 +279,20 @@ impl IndexDriverRunner {
                             observer,
                         } => {
                             observer
-                                .send(self.indexer.scan_record_handles_left_shift(
-                                    stream_id, range, offset, max_offset, max_bytes,
-                                ))
+                                .send(
+                                    self.indexer
+                                        .scan_record_handles_left_shift(
+                                            stream_id, range, offset, max_offset, max_bytes,
+                                        )
+                                        .map(|indexes_opt| {
+                                            indexes_opt.map(|indexes| {
+                                                indexes
+                                                    .into_iter()
+                                                    .map(|(_, handle)| handle)
+                                                    .collect()
+                                            })
+                                        }),
+                                )
                                 .unwrap_or_else(|_e| {
                                     error!(
                                         "Failed to send scan result of {}/{} to observer.",
@@ -266,6 +310,10 @@ impl IndexDriverRunner {
                         }
 
                         IndexCommand::CreateRange { range, tx } => {
+                            log_cleaner.handle_new_range(
+                                (range.stream_id(), range.index() as u32),
+                                range.start(),
+                            );
                             match self.indexer.add(range.stream_id(), &range) {
                                 Ok(()) => {
                                     let _ = tx.send(Ok(()));
@@ -287,6 +335,10 @@ impl IndexDriverRunner {
                                     let _ = tx.send(Err(e));
                                 }
                             }
+                        }
+                        IndexCommand::RangeEvent { events, tx } => {
+                            let phy_offset = log_cleaner.handle_range_event(events);
+                            let _ = tx.send(phy_offset);
                         }
                     },
                     Err(TryRecvError::Empty) => {
@@ -310,7 +362,7 @@ impl IndexDriverRunner {
 mod tests {
     use config::Configuration;
 
-    use crate::index::MinOffset;
+    use crate::index::{Indexer, MinOffset};
     use std::{error::Error, sync::Arc};
 
     struct TestMinOffset {}
@@ -330,7 +382,7 @@ mod tests {
             .store
             .path
             .set_base(db_path.path().as_os_str().to_str().unwrap());
-        let config = Arc::new(Configuration::default());
+        let config = Arc::new(configuration);
         let index_driver = super::IndexDriver::new(&config, min_offset, 128)?;
         assert_eq!(0, index_driver.get_wal_checkpoint()?);
 

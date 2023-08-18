@@ -2,8 +2,8 @@ use byteorder::ReadBytesExt;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use log::{trace, warn};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use protocol::rpc::header::{CommonFlags, GoAwayFlags, OperationCode};
 use std::cell::RefCell;
-use std::fmt::{self, Display};
 use std::io::Cursor;
 
 use crate::error::FrameError;
@@ -15,10 +15,6 @@ pub(crate) const MIN_FRAME_LENGTH: u32 = 16;
 // Max frame length 16MB
 pub(crate) const MAX_FRAME_LENGTH: u32 = 16 * 1024 * 1024;
 
-const FLAG_RESPONSE: u8 = 0x01;
-const FLAG_END_OF_STREAM: u8 = 0x01 << 1;
-const FLAG_SYSTEM_ERROR: u8 = 0x01 << 2;
-
 thread_local! {
     static STREAM_ID: RefCell<u32> = RefCell::new(1);
 }
@@ -27,10 +23,13 @@ thread_local! {
 pub struct Frame {
     pub operation_code: OperationCode,
 
-    pub flag: u8,
+    /// Further refine semantic of the opcode.
+    ///
+    /// Semantics of flag is defined per opcode basis.
+    flag: u8,
 
-    // Stream-ID, starting from 1.
-    // stream-id `0` is used as placeholder only.
+    /// Stream-ID, starting from 1.
+    /// stream-id `0` is used as placeholder only.
     pub stream_id: u32,
 
     pub header_format: HeaderFormat,
@@ -60,30 +59,50 @@ impl Frame {
     }
 
     pub fn is_response(&self) -> bool {
-        self.flag & FLAG_RESPONSE == FLAG_RESPONSE
+        self.has_common_flag(CommonFlags::RESPONSE)
     }
 
     pub fn flag_response(&mut self) {
-        self.flag |= FLAG_RESPONSE;
+        self.flag_common(CommonFlags::RESPONSE);
     }
 
     pub fn end_of_stream(&self) -> bool {
-        self.flag & FLAG_END_OF_STREAM == FLAG_END_OF_STREAM
+        self.has_common_flag(CommonFlags::END_OF_STREAM)
     }
 
     pub fn flag_end_of_response_stream(&mut self) {
-        self.flag |= FLAG_RESPONSE;
-        self.flag |= FLAG_END_OF_STREAM;
+        self.flag_common(CommonFlags::RESPONSE);
+        self.flag_common(CommonFlags::END_OF_STREAM);
     }
 
     pub fn system_error(&self) -> bool {
-        self.flag & FLAG_SYSTEM_ERROR == FLAG_SYSTEM_ERROR
+        self.has_common_flag(CommonFlags::SYSTEM_ERROR)
     }
 
     pub fn flag_system_err(&mut self) {
-        self.flag |= FLAG_END_OF_STREAM;
-        self.flag |= FLAG_RESPONSE;
-        self.flag |= FLAG_SYSTEM_ERROR;
+        self.flag_common(CommonFlags::END_OF_STREAM);
+        self.flag_common(CommonFlags::RESPONSE);
+        self.flag_common(CommonFlags::SYSTEM_ERROR);
+    }
+
+    #[inline]
+    fn flag_common(&mut self, flag: CommonFlags) {
+        self.flag |= flag.0 as u8;
+    }
+
+    #[inline]
+    fn has_common_flag(&self, flag: CommonFlags) -> bool {
+        self.flag & flag.0 as u8 == flag.0 as u8
+    }
+
+    #[inline]
+    pub fn flag_go_away(&mut self, flag: GoAwayFlags) {
+        self.flag |= flag.0 as u8;
+    }
+
+    #[inline]
+    pub fn has_go_away_flag(&self, flag: GoAwayFlags) -> bool {
+        self.flag & flag.0 as u8 == flag.0 as u8
     }
 
     pub fn check(src: &mut Cursor<&[u8]>) -> Result<(), FrameError> {
@@ -214,6 +233,11 @@ impl Frame {
         Ok(())
     }
 
+    #[inline]
+    fn to_opcode_unchecked(code: u16) -> OperationCode {
+        OperationCode(code as i16)
+    }
+
     pub fn parse(src: &mut Cursor<&[u8]>) -> Result<Frame, FrameError> {
         // Safety: previous `check` method ensures we are having a complete frame to parse
         let frame_length = src.get_u32();
@@ -225,7 +249,7 @@ impl Frame {
 
         let op_code = src.get_u16();
         remaining -= 2;
-        let op_code = OperationCode::try_from(op_code).unwrap_or(OperationCode::Unknown);
+        let op_code = Self::to_opcode_unchecked(op_code);
 
         let flag = src.get_u8();
         remaining -= 1;
@@ -298,7 +322,7 @@ impl Frame {
 
         basic_part.put_u32(frame_length as u32);
         basic_part.put_u8(crate::frame::MAGIC_CODE);
-        basic_part.put_u16(self.operation_code.into());
+        basic_part.put_i16(self.operation_code.0);
         basic_part.put_u8(self.flag);
         basic_part.put_u32(self.stream_id);
         basic_part.put_u8(self.header_format.into());
@@ -328,6 +352,23 @@ impl Frame {
 
         Ok(encode_result)
     }
+
+    pub fn get_response_payload(&self) -> Option<Bytes> {
+        if let Some(payload_parts) = &self.payload {
+            if payload_parts.len() == 1 {
+                // Response which passed by network payload is parsed as single bytes.
+                return Some(payload_parts[0].clone());
+            }
+            let mut bytes =
+                BytesMut::with_capacity(payload_parts.iter().map(|b| b.len()).sum::<usize>());
+            for b in payload_parts {
+                bytes.put(b.clone());
+            }
+            Some(bytes.freeze())
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
@@ -339,72 +380,6 @@ pub enum HeaderFormat {
     FlatBuffer = 0x01,
     ProtoBuffer = 0x02,
     JSON = 0x03,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
-#[repr(u16)]
-pub enum OperationCode {
-    // 0x0000 is reserved for unknown
-    Unknown = 0x0000,
-
-    // 0x0000 ~ 0x0FFF is reserved for system
-
-    // Measure a minimal round-trip time from the sender.
-    Ping = 0x0001,
-    // Initiate a shutdown of a connection or signal serious error conditions.
-    GoAway = 0x0002,
-    // To keep clients alive through periodic heartbeat frames.
-    Heartbeat = 0x0003,
-
-    // Allocate a unique ID from placement drivers.
-    AllocateId = 0x0004,
-
-    // 0x1000 ~ 0x1FFF is reserved for data communication
-
-    // Append records to the range server.
-    Append = 0x1001,
-    // Fetch records from the range server.
-    Fetch = 0x1002,
-
-    // 0x2000 ~ 0x2FFF is reserved for range management
-
-    // List ranges from the PD of a batch of streams.
-    ListRange = 0x2001,
-    // Request seal ranges of a batch of streams.
-    // The PD will provide the `SEAL_AND_NEW` semantic while Range Server only provide the `SEAL` semantic.
-    SealRange = 0x2002,
-    // Syncs newly writable ranges to a range server to accelerate the availability of a newly created writable range.
-    SyncRange = 0x2003,
-
-    // Create a new range for a stream.
-    CreateRange = 0x2004,
-
-    // 0x3000 ~ 0x3FFF is reserved for stream management
-
-    // Create a batch of streams.
-    CreateStream = 0x3001,
-    // Delete a batch of streams.
-    DeleteStream = 0x3002,
-    // Update a batch of streams.
-    UpdateStream = 0x3003,
-    // Describe the details of a batch of streams.
-    DescribeStream = 0x3004,
-    // Trim the min offset of a batch of streams.
-    TrimStream = 0x3005,
-
-    // 0x4000 ~ 0x4FFF is reserved for observability
-
-    // Range Server reports metrics to the PD.
-    ReportMetrics = 0x4001,
-
-    // Describe placement driver cluster membership.
-    DescribePlacementDriver = 0x4002,
-}
-
-impl Display for OperationCode {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
 }
 
 #[cfg(test)]
@@ -423,10 +398,8 @@ mod tests {
         let num: u8 = HeaderFormat::JSON.into();
         assert_eq!(3, num);
 
-        let res = OperationCode::try_from(0u16);
-        assert_eq!(Ok(OperationCode::Unknown), res);
-        let num: u16 = OperationCode::GoAway.into();
-        assert_eq!(2, num);
+        let res = Frame::to_opcode_unchecked(0u16);
+        assert_eq!(OperationCode::UNKNOWN, res);
     }
 
     #[test]
@@ -490,7 +463,7 @@ mod tests {
         // magic code
         buffer.put_u8(16u8);
         // operation code
-        buffer.put_u16(OperationCode::Ping.into());
+        buffer.put_i16(OperationCode::PING.0);
         // flag
         buffer.put_u8(0u8);
         // stream identifier
@@ -526,7 +499,7 @@ mod tests {
         header.put(&b"abc"[..]);
 
         let frame = Frame {
-            operation_code: OperationCode::Ping,
+            operation_code: OperationCode::PING,
             flag: 1,
             stream_id: 2,
             header_format: HeaderFormat::FlatBuffer,
@@ -566,7 +539,7 @@ mod tests {
         body.put(&b"abc"[..]);
 
         let frame = Frame {
-            operation_code: OperationCode::Ping,
+            operation_code: OperationCode::PING,
             flag: 1,
             stream_id: 2,
             header_format: HeaderFormat::FlatBuffer,
@@ -608,7 +581,7 @@ mod tests {
         // magic code
         raw_frame.put_u8(MAGIC_CODE);
         // operation code
-        raw_frame.put_u16(OperationCode::Ping.into());
+        raw_frame.put_i16(OperationCode::PING.0);
         // flag
         raw_frame.put_u8(1);
         // stream identifier
@@ -642,7 +615,7 @@ mod tests {
         // magic code
         raw_frame.put_u8(MAGIC_CODE);
         // operation code
-        raw_frame.put_u16(OperationCode::Ping.into());
+        raw_frame.put_i16(OperationCode::PING.0);
         // flag
         raw_frame.put_u8(1);
         // stream identifier
@@ -679,7 +652,7 @@ mod tests {
         body.put(&b"abc"[..]);
 
         let frame = Frame {
-            operation_code: OperationCode::Ping,
+            operation_code: OperationCode::PING,
             flag: 1,
             stream_id: 2,
             header_format: HeaderFormat::FlatBuffer,
@@ -707,7 +680,7 @@ mod tests {
 
         // Validate parse
         let decoded = Frame::parse(&mut cursor).unwrap();
-        assert_eq!(OperationCode::Ping, decoded.operation_code);
+        assert_eq!(OperationCode::PING, decoded.operation_code);
         assert_eq!(1, decoded.flag);
         assert_eq!(2, decoded.stream_id);
         assert_eq!(HeaderFormat::FlatBuffer, decoded.header_format);

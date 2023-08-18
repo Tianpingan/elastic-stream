@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"github.com/spf13/viper"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.uber.org/zap"
+
+	"github.com/AutoMQ/pd/pkg/util/netutil"
 )
 
 var (
@@ -35,7 +38,7 @@ const (
 	_defaultDataDirFormat                     = "default.%s"
 	_defaultInitialClusterFormat              = "%s=%s"
 	_defaultInitialClusterToken               = "pd-cluster"
-	_defaultPDAddr                            = "127.0.0.1:12378"
+	_defaultPDAddr                            = "0.0.0.0:12378"
 	_defaultLeaderLease                 int64 = 3
 	_defaultLeaderPriorityCheckInterval       = time.Minute
 
@@ -75,7 +78,8 @@ type Config struct {
 
 	LeaderPriorityCheckInterval time.Duration
 
-	lg *zap.Logger
+	Version bool
+	lg      *zap.Logger
 }
 
 // NewConfig creates a new config.
@@ -103,24 +107,24 @@ func NewConfig(arguments []string, errOutput io.Writer) (*Config, error) {
 	err = v.ReadInConfig()
 	if err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return nil, errors.Wrap(err, "read configuration file")
+			return nil, errors.WithMessage(err, "read configuration file")
 		}
 	}
 
 	// set config
 	err = v.Unmarshal(cfg)
 	if err != nil {
-		return nil, errors.Wrap(err, "unmarshal configuration")
+		return nil, errors.WithMessage(err, "unmarshal configuration")
 	}
 
 	// new and set logger (first thing after configuration loaded)
 	err = cfg.Log.Adjust()
 	if err != nil {
-		return nil, errors.Wrap(err, "adjust log config")
+		return nil, errors.WithMessage(err, "adjust log config")
 	}
 	logger, err := cfg.Log.Logger()
 	if err != nil {
-		return nil, errors.Wrap(err, "create logger")
+		return nil, errors.WithMessage(err, "create logger")
 	}
 	cfg.lg = logger
 
@@ -142,7 +146,7 @@ func (c *Config) Adjust() error {
 	if c.Name == "" {
 		hostname, err := os.Hostname()
 		if err != nil {
-			return errors.Wrap(err, "get hostname")
+			return errors.WithMessage(err, "get hostname")
 		}
 		c.Name = fmt.Sprintf(_defaultNameFormat, hostname)
 	}
@@ -160,13 +164,13 @@ func (c *Config) Adjust() error {
 		c.InitialCluster = strings.Join(nodes, URLSeparator)
 	}
 	if c.AdvertisePDAddr == "" {
-		c.AdvertisePDAddr = c.PDAddr
+		c.AdvertisePDAddr = defaultAdvertisePDAddr(c.PDAddr)
 	}
 
 	// set etcd config
 	err := c.adjustEtcd()
 	if err != nil {
-		return errors.Wrap(err, "adjust etcd config")
+		return errors.WithMessage(err, "adjust etcd config")
 	}
 
 	return nil
@@ -180,21 +184,21 @@ func (c *Config) adjustEtcd() error {
 	// cfg.EnablePprof = true
 
 	var err error
-	cfg.LPUrls, err = parseUrls(c.PeerUrls)
+	cfg.ListenPeerUrls, err = parseUrls(c.PeerUrls)
 	if err != nil {
-		return errors.Wrap(err, "parse peer url")
+		return errors.WithMessage(err, "parse peer url")
 	}
-	cfg.LCUrls, err = parseUrls(c.ClientUrls)
+	cfg.ListenClientUrls, err = parseUrls(c.ClientUrls)
 	if err != nil {
-		return errors.Wrap(err, "parse client url")
+		return errors.WithMessage(err, "parse client url")
 	}
-	cfg.APUrls, err = parseUrls(c.AdvertisePeerUrls)
+	cfg.AdvertisePeerUrls, err = parseUrls(c.AdvertisePeerUrls)
 	if err != nil {
-		return errors.Wrap(err, "parse advertise peer url")
+		return errors.WithMessage(err, "parse advertise peer url")
 	}
-	cfg.ACUrls, err = parseUrls(c.AdvertiseClientUrls)
+	cfg.AdvertiseClientUrls, err = parseUrls(c.AdvertiseClientUrls)
 	if err != nil {
-		return errors.Wrap(err, "parse advertise client url")
+		return errors.WithMessage(err, "parse advertise client url")
 	}
 
 	return nil
@@ -204,15 +208,15 @@ func (c *Config) adjustEtcd() error {
 func (c *Config) Validate() error {
 	_, err := filepath.Abs(c.DataDir)
 	if err != nil {
-		return errors.Wrapf(err, "invalid data dir path `%s`", c.DataDir)
+		return errors.WithMessagef(err, "invalid data dir path `%s`", c.DataDir)
 	}
 
 	if err := c.Cluster.Validate(); err != nil {
-		return errors.Wrap(err, "validate cluster config")
+		return errors.WithMessage(err, "validate cluster config")
 	}
 
 	if err := c.Sbp.Validate(); err != nil {
-		return errors.Wrap(err, "validate sbp config")
+		return errors.WithMessage(err, "validate sbp config")
 	}
 
 	return nil
@@ -246,6 +250,9 @@ func newFlagSet(errOutput io.Writer) *pflag.FlagSet {
 }
 
 func configure(v *viper.Viper, fs *pflag.FlagSet) {
+	fs.BoolP("version", "V", false, "print version information and exit")
+	_ = v.BindPFlag("version", fs.Lookup("version"))
+
 	// etcd urls settings
 	fs.String("peer-urls", _defaultPeerUrls, "urls for peer traffic")
 	fs.String("client-urls", _defaultClientUrls, "urls for client traffic")
@@ -272,7 +279,7 @@ func configure(v *viper.Viper, fs *pflag.FlagSet) {
 	fs.Duration("leader-priority-check-interval", _defaultLeaderPriorityCheckInterval, "time interval for checking the leader's priority")
 	fs.String("etcd-initial-cluster-token", _defaultInitialClusterToken, "set different tokens to prevent communication between PD nodes in different clusters")
 	fs.String("pd-addr", _defaultPDAddr, "the address of PD")
-	fs.String("advertise-pd-addr", "", "advertise address of PD (default '${pd-addr}')")
+	fs.String("advertise-pd-addr", "", "advertise address of PD (default to the first non-loopback ip and the port of 'pd-addr')")
 	_ = v.BindPFlag("name", fs.Lookup("name"))
 	_ = v.BindPFlag("dataDir", fs.Lookup("data-dir"))
 	_ = v.BindPFlag("initialCluster", fs.Lookup("initial-cluster"))
@@ -297,11 +304,24 @@ func parseUrls(s string) ([]url.URL, error) {
 	for _, item := range items {
 		u, err := url.Parse(item)
 		if err != nil {
-			return nil, errors.Wrapf(err, "parse url %s", item)
+			return nil, errors.WithMessagef(err, "parse url %s", item)
 		}
 
 		urls = append(urls, *u)
 	}
 
 	return urls, nil
+}
+
+func defaultAdvertisePDAddr(pdAddr string) string {
+	_, port, err := net.SplitHostPort(pdAddr)
+	if err != nil {
+		return pdAddr
+	}
+
+	ip, err := netutil.GetNonLoopbackIP()
+	if err != nil {
+		return fmt.Sprintf("127.0.0.1:%s", port)
+	}
+	return fmt.Sprintf("%s:%s", ip, port)
 }

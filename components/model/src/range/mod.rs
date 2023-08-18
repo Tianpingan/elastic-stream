@@ -2,9 +2,39 @@ use std::fmt::{self, Display, Formatter};
 
 use derivative::Derivative;
 use log::info;
-use protocol::rpc::header::{RangeServerT, RangeT};
+use protocol::rpc::header::{OffloadOwnerT, RangeServerT, RangeT};
 
 use crate::range_server::RangeServer;
+
+/// The owner of the range which offloads the data to the object storage.
+#[derive(Debug, PartialEq, Clone)]
+pub struct OffloadOwner {
+    /// The owner's [`server_id`].
+    ///
+    /// [`server_id`]: RangeServer::server_id
+    pub server_id: i32,
+
+    /// The epoch of the owner, which is used to check the validity of the owner.
+    pub epoch: i16,
+}
+
+impl From<&OffloadOwner> for OffloadOwnerT {
+    fn from(value: &OffloadOwner) -> Self {
+        let mut owner = OffloadOwnerT::default();
+        owner.server_id = value.server_id;
+        owner.epoch = value.epoch;
+        owner
+    }
+}
+
+impl From<&OffloadOwnerT> for OffloadOwner {
+    fn from(value: &OffloadOwnerT) -> Self {
+        Self {
+            server_id: value.server_id,
+            epoch: value.epoch,
+        }
+    }
+}
 
 /// Representation of a stream range in form of `[start, end)` in which `start` is inclusive and `end` is exclusive.
 /// If `start` == `end`, there will be no valid records in the range.
@@ -15,7 +45,7 @@ use crate::range_server::RangeServer;
 #[derive(Derivative)]
 #[derivative(Debug, PartialEq, Clone)]
 pub struct RangeMetadata {
-    stream_id: i64,
+    stream_id: u64,
 
     epoch: u64,
 
@@ -39,11 +69,15 @@ pub struct RangeMetadata {
     /// The range replica ack count, only success ack >= ack_count, then the write is success.
     /// For seal range, success seal range must seal replica count >= (replica_count - ack_count + 1)
     ack_count: u8,
+
+    /// The owner of the range which offloads the data to the object storage.
+    /// If [`replica`] is empty, [`offload_owner`] will be None.
+    offload_owner: Option<OffloadOwner>,
 }
 
 impl RangeMetadata {
     // TODO: replace with new_range, after add RangeReplicaMeta
-    pub fn new(stream_id: i64, index: i32, epoch: u64, start: u64, end: Option<u64>) -> Self {
+    pub fn new(stream_id: u64, index: i32, epoch: u64, start: u64, end: Option<u64>) -> Self {
         Self {
             stream_id,
             index,
@@ -53,11 +87,15 @@ impl RangeMetadata {
             replica: vec![],
             replica_count: 0,
             ack_count: 0,
+            offload_owner: Some(OffloadOwner {
+                server_id: 0,
+                epoch: 0,
+            }),
         }
     }
 
     pub fn new_range(
-        stream_id: i64,
+        stream_id: u64,
         index: i32,
         epoch: u64,
         start: u64,
@@ -74,6 +112,10 @@ impl RangeMetadata {
             replica: vec![],
             replica_count,
             ack_count,
+            offload_owner: Some(OffloadOwner {
+                server_id: 0,
+                epoch: 0,
+            }),
         }
     }
 
@@ -83,6 +125,11 @@ impl RangeMetadata {
 
     pub fn replica_mut(&mut self) -> &mut Vec<RangeServer> {
         &mut self.replica
+    }
+
+    /// Whether the range is held by the given server or not.
+    pub fn held_by(&self, server_id: i32) -> bool {
+        self.replica.iter().any(|s| s.server_id == server_id)
     }
 
     /// Test if the given offset is within the range.
@@ -98,7 +145,7 @@ impl RangeMetadata {
         }
     }
 
-    pub fn stream_id(&self) -> i64 {
+    pub fn stream_id(&self) -> u64 {
         self.stream_id
     }
 
@@ -114,6 +161,15 @@ impl RangeMetadata {
         self.start
     }
 
+    pub fn trim_start(&mut self, offset: u64) {
+        debug_assert!(offset > self.start);
+        info!(
+            "Start-offset of range[StreamId={}, index={}] trimmed: {} --> {}",
+            self.stream_id, self.index, self.start, offset
+        );
+        self.start = offset;
+    }
+
     pub fn end(&self) -> Option<u64> {
         self.end
     }
@@ -126,7 +182,11 @@ impl RangeMetadata {
         self.ack_count
     }
 
-    pub fn is_sealed(&self) -> bool {
+    pub fn offload_owner(&self) -> &Option<OffloadOwner> {
+        &self.offload_owner
+    }
+
+    pub fn has_end(&self) -> bool {
         self.end.is_some()
     }
 
@@ -153,7 +213,7 @@ impl Display for RangeMetadata {
 impl From<&RangeMetadata> for RangeT {
     fn from(value: &RangeMetadata) -> Self {
         let mut range = RangeT::default();
-        range.stream_id = value.stream_id;
+        range.stream_id = value.stream_id as i64;
         range.epoch = value.epoch as i64;
         range.index = value.index;
         range.start = value.start as i64;
@@ -172,6 +232,10 @@ impl From<&RangeMetadata> for RangeT {
         }
         range.replica_count = value.replica_count as i8;
         range.ack_count = value.ack_count as i8;
+        range.offload_owner = value
+            .offload_owner
+            .as_ref()
+            .map(|o| Box::new(OffloadOwnerT::from(o)));
         range
     }
 }
@@ -185,7 +249,7 @@ impl From<&RangeT> for RangeMetadata {
             }
         }
         Self {
-            stream_id: value.stream_id,
+            stream_id: value.stream_id as u64,
             epoch: value.epoch as u64,
             index: value.index,
             start: value.start as u64,
@@ -196,8 +260,32 @@ impl From<&RangeT> for RangeMetadata {
             replica,
             replica_count: value.replica_count as u8,
             ack_count: value.ack_count as u8,
+            offload_owner: value
+                .offload_owner
+                .as_ref()
+                .map(|o| OffloadOwner::from(o.as_ref())),
         }
     }
+}
+
+pub type StreamId = u64;
+pub type RangeIndex = u32;
+pub type Range = (StreamId, RangeIndex);
+
+type StartOffset = u64;
+
+/// RangeLifecycleEvent
+/// Note: Offloaded and Del are necessary, cause of the local replica data's
+/// end_offset may be larger than Range end_offset, we need Offloaded & Del
+/// to force release resource.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum RangeEvent {
+    // The data before start offset is deletable.
+    OffsetMove(Range, StartOffset),
+    // The data in range is offloaded.
+    Offloaded(Range),
+    // The range is deleted.
+    Del(Range),
 }
 
 #[cfg(test)]
@@ -207,11 +295,11 @@ mod tests {
     #[test]
     fn test_take_slot() {
         let mut range = RangeMetadata::new(0, 0, 0, 0, None);
-        assert!(!range.is_sealed());
+        assert!(!range.has_end());
 
         // Double seal should return the same offset.
         range.set_end(100);
-        assert!(range.is_sealed());
+        assert!(range.has_end());
         assert_eq!(range.end(), Some(100));
     }
 

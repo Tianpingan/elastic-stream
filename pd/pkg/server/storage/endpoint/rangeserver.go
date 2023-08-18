@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/AutoMQ/pd/api/rpcfb/rpcfb"
+	"github.com/AutoMQ/pd/pkg/server/model"
 	"github.com/AutoMQ/pd/pkg/server/storage/kv"
 	"github.com/AutoMQ/pd/pkg/util/fbutil"
 	"github.com/AutoMQ/pd/pkg/util/traceutil"
@@ -26,38 +27,38 @@ const (
 	_rangeServerByRangeLimit = 1e4
 )
 
-type RangeServer interface {
+type RangeServerEndpoint interface {
+	// SaveRangeServer creates or updates the given range server and returns it.
 	SaveRangeServer(ctx context.Context, rangeServer *rpcfb.RangeServerT) (*rpcfb.RangeServerT, error)
+	// ForEachRangeServer calls the given function for every range server in the storage.
+	// If f returns an error, the iteration is stopped and the error is returned.
 	ForEachRangeServer(ctx context.Context, f func(rangeServer *rpcfb.RangeServerT) error) error
 }
 
-// SaveRangeServer creates or updates the given range server and returns it.
 func (e *Endpoint) SaveRangeServer(ctx context.Context, rangeServer *rpcfb.RangeServerT) (*rpcfb.RangeServerT, error) {
 	logger := e.lg.With(zap.Int32("server-id", rangeServer.ServerId), traceutil.TraceLogField(ctx))
 
-	if rangeServer.ServerId < MinRangeServerID {
+	if rangeServer.ServerId < model.MinRangeServerID {
 		logger.Error("invalid range server id")
-		return nil, errors.Errorf("invalid range server id: %d < %d", rangeServer.ServerId, MinRangeServerID)
+		return nil, errors.Errorf("invalid range server id: %d < %d", rangeServer.ServerId, model.MinRangeServerID)
 	}
 
 	key := rangeServerPath(rangeServer.ServerId)
 	value := fbutil.Marshal(rangeServer)
 	defer mcache.Free(value)
 
-	_, err := e.Put(ctx, key, value, false)
+	_, err := e.KV.Put(ctx, key, value, false, 0)
 	if err != nil {
 		logger.Error("failed to save range server", zap.Error(err))
-		return nil, errors.Wrap(err, "save range server")
+		return nil, errors.WithMessagef(err, "save range server %d", rangeServer.ServerId)
 	}
 
 	return rangeServer, nil
 }
 
-// ForEachRangeServer calls the given function for every range server in the storage.
-// If f returns an error, the iteration is stopped and the error is returned.
 func (e *Endpoint) ForEachRangeServer(ctx context.Context, f func(rangeServer *rpcfb.RangeServerT) error) error {
-	var startID = MinRangeServerID
-	for startID >= MinRangeServerID {
+	var startID = model.MinRangeServerID
+	for startID >= model.MinRangeServerID {
 		nextID, err := e.forEachRangeServerLimited(ctx, f, startID, _rangeServerByRangeLimit)
 		if err != nil {
 			return err
@@ -71,10 +72,10 @@ func (e *Endpoint) forEachRangeServerLimited(ctx context.Context, f func(rangeSe
 	logger := e.lg.With(traceutil.TraceLogField(ctx))
 
 	startKey := rangeServerPath(startID)
-	kvs, err := e.GetByRange(ctx, kv.Range{StartKey: startKey, EndKey: e.endRangeServerPath()}, limit, false)
+	kvs, _, more, err := e.KV.GetByRange(ctx, kv.Range{StartKey: startKey, EndKey: e.endRangeServerPath()}, 0, limit, false)
 	if err != nil {
 		logger.Error("failed to get range servers", zap.Int32("start-id", startID), zap.Int64("limit", limit), zap.Error(err))
-		return MinRangeServerID - 1, errors.Wrap(err, "get range servers")
+		return model.MinRangeServerID - 1, errors.WithMessage(err, "get range servers")
 	}
 
 	for _, keyValue := range kvs {
@@ -82,19 +83,19 @@ func (e *Endpoint) forEachRangeServerLimited(ctx context.Context, f func(rangeSe
 		nextID = rangeServer.ServerId + 1
 		err = f(rangeServer)
 		if err != nil {
-			return MinRangeServerID - 1, err
+			return model.MinRangeServerID - 1, err
 		}
 	}
 
-	if int64(len(kvs)) < limit {
+	if !more {
 		// no more range servers
-		nextID = MinRangeServerID - 1
+		nextID = model.MinRangeServerID - 1
 	}
 	return
 }
 
 func (e *Endpoint) endRangeServerPath() []byte {
-	return e.GetPrefixRangeEnd([]byte(_rangeServerPrefix))
+	return e.KV.GetPrefixRangeEnd([]byte(_rangeServerPrefix))
 }
 
 func rangeServerPath(serverID int32) []byte {

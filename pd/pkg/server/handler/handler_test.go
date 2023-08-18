@@ -2,13 +2,14 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
+	"github.com/AutoMQ/pd/api/rpcfb/rpcfb"
 	sbpClient "github.com/AutoMQ/pd/pkg/sbp/client"
 	"github.com/AutoMQ/pd/pkg/sbp/protocol"
 	"github.com/AutoMQ/pd/pkg/server/cluster"
@@ -22,13 +23,13 @@ import (
 )
 
 type mockServer struct {
-	kv        clientv3.KV
+	client    kv.Client
 	sbpClient sbpClient.Client
 }
 
 func (m *mockServer) Storage() storage.Storage {
 	etcdKV := kv.NewEtcd(kv.EtcdParam{
-		KV:       m.kv,
+		Client:   m.client,
 		RootPath: "/test-server",
 		CmpFunc:  func() clientv3.Cmp { return clientv3.Compare(clientv3.CreateRevision("not-exist-key"), "=", 0) },
 	}, zap.NewNop())
@@ -37,7 +38,7 @@ func (m *mockServer) Storage() storage.Storage {
 
 func (m *mockServer) IDAllocator(key string, start, step uint64) id.Allocator {
 	return id.NewEtcdAllocator(&id.EtcdAllocatorParam{
-		KV:       m.kv,
+		KV:       m.client,
 		CmpFunc:  func() clientv3.Cmp { return clientv3.Compare(clientv3.CreateRevision("not-exist-key"), "=", 0) },
 		RootPath: "/test-server",
 		Key:      key,
@@ -46,7 +47,7 @@ func (m *mockServer) IDAllocator(key string, start, step uint64) id.Allocator {
 	}, zap.NewNop())
 }
 
-func (m *mockServer) Member() cluster.Member {
+func (m *mockServer) Member() cluster.MemberService {
 	return m
 }
 
@@ -84,26 +85,115 @@ func (m mockSbpClient) Do(_ protocol.OutRequest, _ sbpClient.Address) (protocol.
 	panic("does not mock yet")
 }
 
-func startSbpHandler(tb testing.TB, sbpClient sbpClient.Client, isLeader bool) (*Handler, func()) {
+func startSbpHandler(tb testing.TB, sbpClient sbpClient.Client, clusterCfg *config.Cluster, isLeader bool) (*Handler, func()) {
 	re := require.New(tb)
 
 	if sbpClient == nil {
 		sbpClient = mockSbpClient{}
 	}
+	if clusterCfg == nil {
+		clusterCfg = config.DefaultCluster()
+	}
 
 	_, client, closeFunc := testutil.StartEtcd(tb, nil)
 
 	var server cluster.Server
-	server = &mockServer{kv: client, sbpClient: sbpClient}
+	server = &mockServer{client: client, sbpClient: sbpClient}
 	if !isLeader {
 		server = &mockServerNotLeader{server}
 	}
 
-	c := cluster.NewRaftCluster(context.Background(), &config.Cluster{SealReqTimeoutMs: 1000, RangeServerTimeout: time.Minute}, server.Member(), zap.NewNop())
+	c := cluster.NewRaftCluster(context.Background(), clusterCfg, server.Member(), zap.NewNop())
 	err := c.Start(server)
 	re.NoError(err)
 
 	h := NewHandler(c, zap.NewNop())
 
 	return h, func() { _ = c.Stop(); closeFunc() }
+}
+
+func preHeartbeats(tb testing.TB, h *Handler, serverIDs ...int32) {
+	for _, serverID := range serverIDs {
+		preHeartbeat(tb, h, serverID)
+	}
+}
+
+func preHeartbeat(tb testing.TB, h *Handler, serverID int32) {
+	re := require.New(tb)
+
+	req := &protocol.HeartbeatRequest{HeartbeatRequestT: rpcfb.HeartbeatRequestT{
+		ClientRole: rpcfb.ClientRoleCLIENT_ROLE_RANGE_SERVER,
+		RangeServer: &rpcfb.RangeServerT{
+			ServerId:      serverID,
+			AdvertiseAddr: fmt.Sprintf("addr-%d", serverID),
+			State:         rpcfb.RangeServerStateRANGE_SERVER_STATE_READ_WRITE,
+		}}}
+	resp := &protocol.HeartbeatResponse{}
+
+	h.Heartbeat(req, resp)
+	re.Equal(rpcfb.ErrorCodeOK, resp.Status.Code, resp.Status.Message)
+}
+
+func preCreateStreams(tb testing.TB, h *Handler, replica int8, cnt int) (streamIDs []int64) {
+	streamIDs = make([]int64, 0, cnt)
+	for i := 0; i < cnt; i++ {
+		stream := preCreateStream(tb, h, replica)
+		streamIDs = append(streamIDs, stream.StreamId)
+	}
+	return
+}
+
+func preCreateStream(tb testing.TB, h *Handler, replica int8) *rpcfb.StreamT {
+	re := require.New(tb)
+
+	req := &protocol.CreateStreamRequest{CreateStreamRequestT: rpcfb.CreateStreamRequestT{
+		Stream: &rpcfb.StreamT{
+			Replica:  replica,
+			AckCount: replica,
+		},
+	}}
+	resp := &protocol.CreateStreamResponse{}
+
+	h.CreateStream(req, resp)
+	re.Equal(rpcfb.ErrorCodeOK, resp.Status.Code, resp.Status.Message)
+
+	return resp.Stream
+}
+
+func preDeleteStream(tb testing.TB, h *Handler, streamID int64) {
+	re := require.New(tb)
+
+	req := &protocol.DeleteStreamRequest{DeleteStreamRequestT: rpcfb.DeleteStreamRequestT{
+		StreamId: streamID,
+	}}
+	resp := &protocol.DeleteStreamResponse{}
+
+	h.DeleteStream(req, resp)
+	re.Equal(rpcfb.ErrorCodeOK, resp.Status.Code, resp.Status.Message)
+}
+
+type preObject struct {
+	streamID    int64
+	rangeIndex  int32
+	epoch       int16
+	startOffset int64
+	endOffset   int64
+	dataLen     int32
+}
+
+func preNewObject(tb testing.TB, h *Handler, object preObject) {
+	re := require.New(tb)
+
+	req := &protocol.CommitObjectRequest{CommitObjectRequestT: rpcfb.CommitObjectRequestT{Object: &rpcfb.ObjT{
+		StreamId:       object.streamID,
+		RangeIndex:     object.rangeIndex,
+		Epoch:          object.epoch,
+		StartOffset:    object.startOffset,
+		EndOffsetDelta: int32(object.endOffset - object.startOffset),
+		DataLen:        object.dataLen,
+	}}}
+	resp := &protocol.CommitObjectResponse{}
+
+	h.CommitObject(req, resp)
+	re.Equal(rpcfb.ErrorCodeOK, resp.Status.Code, resp.Status.Message)
 }

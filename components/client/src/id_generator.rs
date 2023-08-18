@@ -4,7 +4,7 @@ use log::{error, trace};
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
 
-use crate::{error::ClientError, Client};
+use crate::{client::Client, error::ClientError, DefaultClient};
 
 /// A trait that generates unique ID.
 pub trait IdGenerator {
@@ -31,14 +31,14 @@ impl IdGenerator for PlacementDriverIdGenerator {
         let config = Arc::clone(&self.config);
         tokio_uring::start(async {
             let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
-            let client = Client::new(config, shutdown_tx);
+            let client = DefaultClient::new(config, shutdown_tx);
 
-            match client.allocate_id(&self.config.server.host).await {
+            match client.allocate_id(&self.config.server.advertise_addr).await {
                 Ok(id) => {
                     trace!(
-                        "Acquired ID={} for range-server[host={}]",
+                        "Acquired ID={} for range-server[{}]",
                         id,
-                        self.config.server.host
+                        self.config.server.advertise_addr
                     );
                     let _ = tx.send(Ok(id));
                 }
@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn test_generate() -> Result<(), Box<dyn Error>> {
-        crate::log::try_init_log();
+        ulog::try_init_log();
         let (stop_tx, stop_rx) = oneshot::channel();
         let (port_tx, port_rx) = oneshot::channel();
 
@@ -80,8 +80,10 @@ mod tests {
 
         let port = port_rx.blocking_recv().unwrap();
 
-        let mut cfg = config::Configuration::default();
-        cfg.placement_driver = format!("localhost:{}", port);
+        let cfg = config::Configuration {
+            placement_driver: format!("127.0.0.1:{}", port),
+            ..Default::default()
+        };
         let config = Arc::new(cfg);
         let generator = PlacementDriverIdGenerator::new(&config);
         let id = generator.generate()?;

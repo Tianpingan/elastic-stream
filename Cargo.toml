@@ -4,23 +4,39 @@
 # will _not_ propagate the feature `x` into `cmd`'s direct dependencies.
 resolver = "2"
 members = [
+    "components/alloc",
     "components/client",
     "components/codec",
     "components/config",
     "components/mock-server",
     "components/model",
+    "components/object-storage",
     "components/observation",
+    "components/pd-client",
     "components/polling",
     "components/protocol",
     "components/replication",
     "components/store",
-    "components/tiered-storage",
     "components/tool",
     "components/transport",
+    "components/ulog",
     "components/util",
     "range-server",
     "sdks/frontend-rs",
 ]
+
+[workspace.package]
+version = "0.2.9"
+authors = [
+    "Li Zhanhui <lizhanhui@gmail.com>",
+    "Ning Yu <chillax65536@gmail.com>",
+    "Han Xu",
+    "Daniel",
+    "Ping'an Tian",
+    "Curtis Wan",
+]
+description = "A Cloud-Native Distributed Storage System For Messaging and Streaming"
+license = "SSPL"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -35,10 +51,11 @@ core_affinity = "0.8"
 crc = "3.0"
 crc32fast = { version = "1.3", features = ["nightly"] }
 derivative = "2.2"
-futures ={ version = "0.3" }
-itertools = { version = "0.10.5" }
+futures = { version = "0.3" }
+itertools = { version = "0.11" }
 lazy_static = "1.4"
-io-uring = "0.5"
+io-uring = "0.6"
+rustc-hash = "1.1.0"
 tokio-uring = { git = "https://github.com/tokio-rs/tokio-uring.git", branch = "master", features = [
     "bytes",
 ] }
@@ -48,7 +65,7 @@ crossbeam = "0.8"
 num_cpus = "1"
 thiserror = "1.0"
 clap = { version = "4.0", features = ["derive", "env"] }
-num_enum = "0.5"
+num_enum = "0.6"
 
 flatbuffers = { git = "https://github.com/google/flatbuffers.git", tag = "v23.3.3" }
 
@@ -59,7 +76,7 @@ opendal = "0.38.0"
 # Logging
 log = { version = "0.4", features = [
     "max_level_trace",
-    "release_max_level_warn",
+    "release_max_level_info",
 ] }
 env_logger = "0.10"
 log4rs = "1.2"
@@ -74,7 +91,7 @@ rocksdb = { git = "https://github.com/AutoMQ/rust-rocksdb.git", branch = "develo
     "jemalloc",
 ] }
 
-pprof = { version = "0.11", features = ["flamegraph"] }
+pprof = { version = "0.12", features = ["flamegraph"] }
 
 rand = { version = "0.8" }
 uuid = { version = "1.3", features = [
@@ -91,18 +108,36 @@ gethostname = "0.4"
 
 ordinal = "0.3"
 
-criterion = "0.4"
+criterion = "0.5"
 
 minstant = "0.1"
-minitrace = "0.4"
+minitrace = { git = "https://github.com/AutoMQ/minitrace-rust.git", features = ["enable"] }
 prometheus = "0.13"
 
 serde = "1.0"
 serde_yaml = "0.9"
+envy = "0.4"
 
 local-sync = "0.1"
 
 tempfile = "3"
+
+lru = "0.11.0"
+skiplist = "0.5"
+
+hdrhistogram = "7.5.2"
+
+tower = "0.4"
+
+pyroscope = "0.5"
+pyroscope_pprofrs = "0.2"
+
+sysinfo = "0.29"
+procfs = "0.15"
+
+opentelemetry = { version = "0.20", features = ["trace"] }
+opentelemetry-otlp = { version = "0.13", features = ["trace"] }
+parking_lot = "0.12.1"
 
 [profile.dev]
 panic = "unwind"

@@ -1,13 +1,23 @@
+use lazy_static::lazy_static;
 use log::{error, info, trace};
-use std::{
-    cell::UnsafeCell, cmp, collections::BTreeMap, ops::Bound, rc::Rc, sync::Arc, time::Instant,
-};
+use minstant::{Anchor, Instant};
+use std::cmp::Ordering;
+use std::{cell::UnsafeCell, cmp, collections::BTreeMap, ops::Bound, rc::Rc, sync::Arc};
 
 use super::buf::AlignedBuf;
 
+lazy_static! {
+    static ref ANCHOR: Anchor = Anchor::new();
+}
+
 #[derive(Debug)]
 pub(crate) struct Entry {
+    /// hit count of the entry.
+    /// this field will be updated in [`BlockCache::try_get_entries`] and used to determine which entry should be dropped.
     hit: usize,
+
+    /// The last time the entry is hit.
+    /// this field will be updated in [`BlockCache::try_get_entries`] and used to determine which entry should be dropped.
     last_hit_instant: Instant,
 
     /// The number of strong references to the entry.
@@ -111,19 +121,16 @@ impl Entry {
     /// Score the cache entry, based on the hit count and last hit instant.
     /// The score is used to determine which cache entry should be dropped,
     /// a higher score means a lower priority to be dropped.
-    pub(crate) fn score(&self) -> i32 {
+    pub(crate) fn score(&self) -> u64 {
         let hit = self.hit;
         let last_hit_instant = self.last_hit_instant;
-        let now = Instant::now();
 
-        let elapsed = now.duration_since(last_hit_instant).as_secs();
-        let elapsed = elapsed as u32;
+        let timestamp = last_hit_instant.as_unix_nanos(&ANCHOR);
 
-        // Use a formula to calculate the score, the hit count will have a positive effect on the score,
-        // while the elapsed time will take a negative effect.
-        // The formula is: score = hit * 1000 - elapsed * 10.
-        // The score will be negative if the elapsed time is greater than the hit count.
-        (hit * 1000) as i32 - (elapsed * 10) as i32
+        // Use a formula to calculate the score, the hit count and timestamp will have a positive effect on the score.
+        // Which means higher hit count and recently access lead to higher score.
+        // Each cache hit will give a bonus of approximately one second.
+        timestamp + ((hit as u64) << 27)
     }
 }
 
@@ -202,6 +209,9 @@ pub(crate) struct BlockCache {
     // The key of the map is a relative wal_offset from the start wal_offset of the block cache.
     entries: BTreeMap<u32, Rc<UnsafeCell<Entry>>>,
 
+    // A map whose keys are always sorted. The key of the map is score and the value is wal_offset.
+    score_list: skiplist::OrderedSkipList<Rc<UnsafeCell<Entry>>>,
+
     // The size of the block cache.
     cache_size: u32,
 
@@ -213,6 +223,26 @@ impl BlockCache {
         Self {
             wal_offset: offset,
             entries: BTreeMap::new(),
+            score_list: unsafe {
+                skiplist::OrderedSkipList::with_comp(
+                    |a: &Rc<UnsafeCell<Entry>>, b: &Rc<UnsafeCell<Entry>>| {
+                        let entry_a = &*a.get();
+                        let entry_b = &*b.get();
+
+                        // If the wal_offset is the same, the entry is the same.
+                        if entry_a.wal_offset() == entry_b.wal_offset() {
+                            return Ordering::Equal;
+                        }
+
+                        // And then compare by score and wal offset.
+                        let score_order = entry_a.score().cmp(&entry_b.score());
+                        if score_order == Ordering::Equal {
+                            return entry_a.wal_offset().cmp(&entry_b.wal_offset());
+                        }
+                        score_order
+                    },
+                )
+            },
             cache_size: 0,
             alignment: config.store.alignment,
         }
@@ -241,6 +271,8 @@ impl BlockCache {
         let mut new_entry = Entry::new(buf);
 
         if let Some(pre_entry) = pre_entry {
+            self.score_list.remove(pre_entry);
+
             // The strong reference count of the replaced entry should be inherited by the new entry.
             let pre_entry = unsafe { &*pre_entry.get() };
             new_entry.strong_rc = pre_entry.strong_rc;
@@ -256,7 +288,8 @@ impl BlockCache {
         let entry = Rc::new(UnsafeCell::new(new_entry));
 
         // The replace occurs when the new entry overlaps with the existing entry.
-        self.entries.insert(from, Rc::clone(&entry));
+        self.entries.insert(from, entry.clone());
+        self.score_list.insert(entry.clone());
     }
 
     /// Add a loading entry to the cache.
@@ -275,10 +308,12 @@ impl BlockCache {
         let entry = Rc::new(UnsafeCell::new(Entry::new_loading_entry(entry_range)));
 
         // The replace occurs when the new entry overlaps with the existing entry.
-        let pre_entry = self.entries.insert(from, entry);
+        let pre_entry = self.entries.insert(from, entry.clone());
 
         // Decrease the cached size if the replaced entry exists and is loaded.
         if let Some(pre_entry) = pre_entry {
+            self.score_list.remove(&pre_entry);
+
             let pre_entry = unsafe { &*pre_entry.get() };
 
             if pre_entry.is_loaded() {
@@ -332,7 +367,7 @@ impl BlockCache {
     /// * `Ok` - The cached entries. If the ok result is None, it means the caller should wait for the ongoing io tasks.
     /// * `Err` - The missed entries, may split the request into multiple missed ranges.
     pub(crate) fn try_get_entries(
-        &self,
+        &mut self,
         entry_range: EntryRange,
     ) -> Result<Option<Vec<Arc<AlignedBuf>>>, Vec<EntryRange>> {
         let wal_offset = entry_range.wal_offset;
@@ -402,10 +437,16 @@ impl BlockCache {
                 .flat_map(|(_k, entry)| {
                     let item = unsafe { &mut *entry.get() };
 
+                    // remove the entry from the score list and insert it again to update the score.
+                    self.score_list.remove(entry);
+
                     // Although here we may not return the buffer to the caller,
                     // we still increase the hit count to reduce the chance of being dropped.
                     item.hit += 1;
                     item.last_hit_instant = Instant::now();
+
+                    self.score_list.insert(entry.clone());
+
                     &item.buf
                 })
                 .map(Arc::clone)
@@ -428,6 +469,44 @@ impl BlockCache {
         }
     }
 
+    /// Retrieve the lowest score of entry from the cache.
+    /// Only entries that are loaded and not referenced by any reader will be counted.
+    ///
+    /// # Returns
+    /// * the lowest score of entry from the cache.
+    pub(crate) fn min_score(&self) -> u64 {
+        if self.score_list.is_empty() {
+            return 0;
+        }
+
+        // pending hit will refresh the score
+        // so that the front entry is strong referenced, other elements should be the same.
+        let entry = unsafe { &*self.score_list.front().unwrap().get() };
+        if !entry.is_strong_referenced() {
+            return entry.score();
+        }
+        0
+    }
+
+    /// Remove a entry with the lowest score from the cache.
+    /// Only entries that are loaded and not referenced by any reader will be counted.
+    ///
+    /// # Returns
+    /// * `Some` - The removed entry.
+    /// * `None` - The entry is not found.
+    pub(crate) fn remove_by_score(&mut self) -> Option<&Entry> {
+        if self.score_list.is_empty() {
+            return None;
+        }
+
+        let entry = unsafe { &*self.score_list.front().unwrap().get() };
+        if !entry.is_strong_referenced() {
+            return self.remove_by(entry.wal_offset());
+        }
+
+        None
+    }
+
     /// Remove a specific entry from the cache.
     ///
     /// # Arguments
@@ -444,6 +523,8 @@ impl BlockCache {
             let entry = self.entries.remove(&from);
 
             if let Some(entry) = entry {
+                self.score_list.remove(&entry);
+
                 let entry = unsafe { &*entry.get() };
 
                 if entry.is_loaded() {
@@ -473,6 +554,8 @@ impl BlockCache {
                     entry.wal_offset(),
                     entry.wal_offset() + entry.len() as u64
                 );
+
+                self.score_list.remove(v);
 
                 // Decrease the cache size.
                 self.cache_size -= entry.capacity();
@@ -506,18 +589,11 @@ impl BlockCache {
     pub(crate) fn cache_size(&self) -> u32 {
         self.cache_size
     }
-
-    /// Return a iterator that reference all the cached entries, with the associated key.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&u32, &Entry)> {
-        self.entries.iter().map(|(k, v)| {
-            let entry = unsafe { &*v.get() };
-            (k, entry)
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Index;
     use std::{
         error::Error,
         sync::{atomic::Ordering, Arc},
@@ -539,8 +615,7 @@ mod tests {
 
         // Case one: add 16 entries, and merge to one range.
         let mut missed_entries: Vec<_> = (0..16)
-            .into_iter()
-            .map(|n| super::EntryRange {
+            .map(|n| EntryRange {
                 wal_offset: n * block_size as u64,
                 len: block_size,
             })
@@ -555,16 +630,15 @@ mod tests {
 
         // Case two: add 16 entries, and merge to two ranges.
         let mut missed_entries: Vec<_> = (0..8)
-            .into_iter()
-            .map(|n| super::EntryRange {
+            .map(|n| EntryRange {
                 wal_offset: n * block_size as u64,
                 len: block_size,
             })
             .collect();
 
         let start_wal_offset = 1024 * block_size as u64;
-        (0..8).into_iter().for_each(|n| {
-            missed_entries.push(super::EntryRange {
+        (0..8).for_each(|n| {
+            missed_entries.push(EntryRange {
                 wal_offset: start_wal_offset + n * block_size as u64,
                 len: block_size,
             });
@@ -581,8 +655,7 @@ mod tests {
 
         // Case three: no merge
         let mut missed_entries: Vec<_> = (0..8)
-            .into_iter()
-            .map(|n| super::EntryRange {
+            .map(|n| EntryRange {
                 wal_offset: n * 3 * block_size as u64,
                 len: block_size,
             })
@@ -591,21 +664,20 @@ mod tests {
         missed_entries.shuffle(&mut rng);
         let merged = missed_entries.merge();
         assert_eq!(8, merged.len());
-        (0..8).into_iter().for_each(|n| {
+        (0..8).for_each(|n| {
             assert_eq!(n * 3 * block_size as u64, merged[n as usize].wal_offset);
         });
 
         // Case four: discard the redundant range.
         let mut missed_entries: Vec<_> = (0..8)
-            .into_iter()
-            .map(|n| super::EntryRange {
+            .map(|n| EntryRange {
                 wal_offset: n * block_size as u64,
                 len: block_size,
             })
             .collect();
 
-        (0..8).into_iter().for_each(|n| {
-            missed_entries.push(super::EntryRange {
+        (0..8).for_each(|n| {
+            missed_entries.push(EntryRange {
                 wal_offset: n * block_size as u64,
                 len: block_size,
             });
@@ -618,28 +690,28 @@ mod tests {
         assert_eq!(8 * block_size, merged[0].len);
 
         // Case five: handle the case that the ranges are overlapped.
-        let mut missed_entries: Vec<_> = vec![];
-
-        // Add a range [0, 2 * block_size)
-        missed_entries.push(super::EntryRange {
-            wal_offset: 0,
-            len: 2 * block_size,
-        });
-        // Add a range [block_size, 3 * block_size)
-        missed_entries.push(super::EntryRange {
-            wal_offset: block_size as u64,
-            len: 3 * block_size,
-        });
-        // Add a range [1 * block_size, 2* block_size)
-        missed_entries.push(super::EntryRange {
-            wal_offset: block_size as u64,
-            len: 2 * block_size,
-        });
-        // Add a range [3 * block_size, 3 * block_size)
-        missed_entries.push(super::EntryRange {
-            wal_offset: 3 * block_size as u64,
-            len: 3 * block_size,
-        });
+        let mut missed_entries: Vec<_> = vec![
+            // Add a range [0, 2 * block_size)
+            EntryRange {
+                wal_offset: 0,
+                len: 2 * block_size,
+            },
+            // Add a range [block_size, 3 * block_size)
+            EntryRange {
+                wal_offset: block_size as u64,
+                len: 3 * block_size,
+            },
+            // Add a range [1 * block_size, 2* block_size)
+            EntryRange {
+                wal_offset: block_size as u64,
+                len: 2 * block_size,
+            },
+            // Add a range [3 * block_size, 3 * block_size)
+            EntryRange {
+                wal_offset: 3 * block_size as u64,
+                len: 3 * block_size,
+            },
+        ];
 
         missed_entries.shuffle(&mut rng);
         let merged = missed_entries.merge();
@@ -654,9 +726,9 @@ mod tests {
         let start_wal_offset = 1024 * 1024 * 1024;
         let cfg = config::Configuration::default();
         let config = Arc::new(cfg);
-        let mut block_cache = super::BlockCache::new(&config, start_wal_offset);
+        let mut block_cache = BlockCache::new(&config, start_wal_offset);
         let block_size = 4096;
-        for n in (0..16).into_iter() {
+        for n in 0..16 {
             let buf = Arc::new(
                 AlignedBuf::new(
                     start_wal_offset + n * block_size as u64,
@@ -670,6 +742,16 @@ mod tests {
         }
 
         assert_eq!(16, block_cache.entries.len());
+        assert_eq!(16, block_cache.score_list.len());
+
+        // Make sure the entries are sorted by score.
+        for i in 0..16 {
+            let entry = block_cache.score_list.index(i);
+            assert_eq!(
+                unsafe { &*entry.get() }.wal_offset(),
+                start_wal_offset + i as u64 * block_size as u64
+            );
+        }
 
         // Assert the
         assert_eq!(
@@ -683,7 +765,7 @@ mod tests {
     fn test_score_cached_entries() {
         let block_size = 4096;
         let mut entries = vec![];
-        for n in (0..16).into_iter() {
+        for n in 0..16 {
             let buf =
                 Arc::new(AlignedBuf::new(n * block_size as u64, block_size, block_size).unwrap());
             buf.limit.store(block_size, Ordering::Relaxed);
@@ -701,8 +783,8 @@ mod tests {
         });
 
         // Assert the entries are sorted by score.
-        for n in (0..16).into_iter() {
-            assert_eq!(n, entries[n as usize].hit);
+        for (n, entry) in entries.iter().enumerate().take(16) {
+            assert_eq!(n, entry.hit);
         }
     }
 
@@ -711,10 +793,10 @@ mod tests {
     fn test_cache_size() {
         let cfg = config::Configuration::default();
         let config = Arc::new(cfg);
-        let mut block_cache = super::BlockCache::new(&config, 0);
+        let mut block_cache = BlockCache::new(&config, 0);
         let block_size = 4096;
         let total = 16;
-        for n in (0..total).into_iter() {
+        for n in 0..total {
             let buf =
                 Arc::new(AlignedBuf::new(n * block_size as u64, block_size, block_size).unwrap());
             buf.limit.store(block_size, Ordering::Relaxed);
@@ -723,9 +805,31 @@ mod tests {
 
         assert_eq!(total as u32 * block_size as u32, block_cache.cache_size());
 
+        // Check the score list.
+        // All entries are sorted by order of addition at the beginning.
+        assert_eq!(total as usize, block_cache.score_list.len());
+        assert_eq!(
+            0,
+            unsafe { &*block_cache.score_list.front().unwrap().get() }.wal_offset()
+        );
+        assert_eq!(
+            (total - 1) * block_size as u64,
+            unsafe { &*block_cache.score_list.back().unwrap().get() }.wal_offset()
+        );
+
         // Test cache size after remove.
         block_cache.remove(|entry| entry.wal_offset() == 0);
         assert_eq!(15 * block_size as u32, block_cache.cache_size());
+
+        assert_eq!(15usize, block_cache.score_list.len());
+        assert_eq!(
+            block_size as u64,
+            unsafe { &*block_cache.score_list.front().unwrap().get() }.wal_offset()
+        );
+        assert_eq!(
+            15 * block_size as u64,
+            unsafe { &*block_cache.score_list.back().unwrap().get() }.wal_offset()
+        );
 
         // Add a loading entry and test cache size.
         block_cache.add_loading_entry(EntryRange {
@@ -734,12 +838,32 @@ mod tests {
         });
         assert_eq!(15 * block_size as u32, block_cache.cache_size());
 
+        assert_eq!(15usize, block_cache.score_list.len());
+        assert_eq!(
+            block_size as u64,
+            unsafe { &*block_cache.score_list.front().unwrap().get() }.wal_offset()
+        );
+        assert_eq!(
+            15 * block_size as u64,
+            unsafe { &*block_cache.score_list.back().unwrap().get() }.wal_offset()
+        );
+
         // Replace a loading entry and test cache size.
         let buf = Arc::new(AlignedBuf::new(0, block_size, block_size).unwrap());
         buf.limit.store(block_size, Ordering::Relaxed);
         block_cache.add_entry(buf);
 
         assert_eq!(16 * block_size as u32, block_cache.cache_size());
+
+        assert_eq!(16usize, block_cache.score_list.len());
+        assert_eq!(
+            block_size as u64,
+            unsafe { &*block_cache.score_list.front().unwrap().get() }.wal_offset()
+        );
+        assert_eq!(
+            0,
+            unsafe { &*block_cache.score_list.back().unwrap().get() }.wal_offset()
+        );
 
         // Replace a entry with a bigger one
         {
@@ -750,6 +874,16 @@ mod tests {
             buf.limit.store(block_size * 2, Ordering::Relaxed);
             block_cache.add_entry(buf);
             assert_eq!(16 * block_size as u32, block_cache.cache_size());
+
+            assert_eq!(15usize, block_cache.score_list.len());
+            assert_eq!(
+                2 * block_size as u64,
+                unsafe { &*block_cache.score_list.front().unwrap().get() }.wal_offset()
+            );
+            assert_eq!(
+                0,
+                unsafe { &*block_cache.score_list.back().unwrap().get() }.wal_offset()
+            );
         }
 
         // Replace a entry with a smaller one
@@ -759,6 +893,7 @@ mod tests {
             buf.limit.store(block_size, Ordering::Relaxed);
             block_cache.add_entry(buf);
             assert_eq!(15 * block_size as u32, block_cache.cache_size());
+            assert_eq!(15usize, block_cache.score_list.len());
         }
 
         // Replace a entry with a loading one
@@ -769,6 +904,7 @@ mod tests {
                 len: block_size as u32,
             });
             assert_eq!(14 * block_size as u32, block_cache.cache_size());
+            assert_eq!(14usize, block_cache.score_list.len());
         }
 
         // Record the cache size by capacity rather than the limit size.
@@ -777,6 +913,7 @@ mod tests {
             buf.limit.store(block_size, Ordering::Relaxed);
             block_cache.add_entry(buf);
             assert_eq!(16 * block_size as u32, block_cache.cache_size());
+            assert_eq!(15usize, block_cache.score_list.len());
         }
     }
 
@@ -784,19 +921,25 @@ mod tests {
     #[test]
     fn test_get_entry() {
         // Case one: total hit in a big cached entry
-
         let cfg = config::Configuration::default();
         let config = Arc::new(cfg);
-        let mut block_cache = super::BlockCache::new(&config, 0);
+        let mut block_cache = BlockCache::new(&config, 0);
         let block_size = 4096;
 
         let buf = Arc::new(AlignedBuf::new(4096, block_size * 1024, block_size).unwrap());
         buf.increase_written(block_size * 1024);
 
         block_cache.add_entry(buf);
+        assert_eq!(1, block_cache.score_list.len());
+        assert_eq!(
+            4096,
+            unsafe { &*block_cache.score_list.back().unwrap().get() }.wal_offset()
+        );
+
+        let score = block_cache.min_score();
 
         let hit = block_cache
-            .try_get_entries(super::EntryRange {
+            .try_get_entries(EntryRange {
                 wal_offset: 4096 * 2,
                 len: 4096 * 10,
             })
@@ -805,9 +948,12 @@ mod tests {
         assert_eq!(1, hit.len());
         assert_eq!(block_size * 1024, hit[0].limit());
 
+        let score_after_get = block_cache.min_score();
+        assert!(score_after_get > score);
+
         // Case two: hit partially in two cached entries
-        let mut block_cache = super::BlockCache::new(&config, 0);
-        let target_entry = super::EntryRange {
+        let mut block_cache = BlockCache::new(&config, 0);
+        let target_entry = EntryRange {
             wal_offset: 0,
             len: 4096 * 10,
         };
@@ -826,7 +972,19 @@ mod tests {
         buf.increase_written(len);
         block_cache.add_entry(buf);
 
+        assert_eq!(2, block_cache.score_list.len());
+        let min_score = block_cache.min_score();
+        let max_score = unsafe { &*block_cache.score_list.back().unwrap().get() }.score();
+
         let hit = block_cache.try_get_entries(target_entry).unwrap_err();
+
+        // Miss will leave the score list untouched
+        assert_eq!(2, block_cache.score_list.len());
+        assert_eq!(min_score, block_cache.min_score());
+        assert_eq!(
+            max_score,
+            unsafe { &*block_cache.score_list.back().unwrap().get() }.score()
+        );
 
         // Miss [0, 4096)
         assert_eq!(3, hit.len());
@@ -843,12 +1001,17 @@ mod tests {
 
         // Try add loading entry
         hit.iter().for_each(|r| {
-            block_cache.add_loading_entry(r.clone());
+            block_cache.add_loading_entry(*r);
         });
 
         let pending_hit = block_cache.try_get_entries(target_entry);
-        assert_eq!(true, pending_hit.is_ok());
-        assert_eq!(true, pending_hit.unwrap().is_none());
+        assert!(pending_hit.is_ok());
+        assert!(pending_hit.unwrap().is_none());
+
+        // Pending hit will renew the score of cached entries
+        assert_eq!(5, block_cache.score_list.len());
+        assert!(block_cache.min_score() > max_score);
+        let last_score = unsafe { &*block_cache.score_list.back().unwrap().get() }.score();
 
         // Complete the loading entry
         hit.iter().for_each(|r| {
@@ -860,27 +1023,36 @@ mod tests {
         // Hit again, with 5 entries returned
         let hit = block_cache.try_get_entries(target_entry).unwrap().unwrap();
         assert_eq!(5, hit.len());
+
+        // Hit will renew the score of cached entries
+        assert_eq!(5, block_cache.score_list.len());
+        assert!(block_cache.min_score() > last_score);
     }
 
     #[test]
     fn test_get_last_writable_entry() {
         let cfg = config::Configuration::default();
         let config = Arc::new(cfg);
-        let mut block_cache = super::BlockCache::new(&config, 0);
+        let mut block_cache = BlockCache::new(&config, 0);
         let block_size = 4096;
 
         let buf = Arc::new(AlignedBuf::new(0, block_size, block_size).unwrap());
         buf.increase_written(1024);
 
         block_cache.add_entry(buf);
+        assert_eq!(1, block_cache.score_list.len());
+        let score = unsafe { &*block_cache.score_list.back().unwrap().get() }.score();
 
-        let target_entry = super::EntryRange {
+        let target_entry = EntryRange {
             wal_offset: 0,
             len: 512,
         };
         let hit = block_cache.try_get_entries(target_entry).unwrap().unwrap();
         assert_eq!(1, hit.len());
         assert_eq!(1024, hit[0].limit());
+
+        assert_eq!(1, block_cache.score_list.len());
+        assert!(block_cache.min_score() > score);
     }
 
     #[test]
@@ -895,5 +1067,44 @@ mod tests {
         let buf_ = block_cache.buf_of_last_cache_entry().unwrap();
         assert!(Arc::ptr_eq(&buf, &buf_));
         Ok(())
+    }
+
+    #[test]
+    fn test_remove() {
+        let cfg = config::Configuration::default();
+        let config = Arc::new(cfg);
+        let mut block_cache = BlockCache::new(&config, 0);
+        let block_size = 4096usize;
+
+        block_cache.add_loading_entry(EntryRange::new(0, block_size as u32, block_size));
+
+        for n in 1..16 {
+            let buf =
+                Arc::new(AlignedBuf::new(n * block_size as u64, block_size, block_size).unwrap());
+            buf.limit.store(block_size, Ordering::Relaxed);
+            block_cache.add_entry(buf);
+        }
+        assert_eq!(16, block_cache.entries.len());
+        assert_eq!(15, block_cache.score_list.len());
+
+        block_cache.remove_by_score();
+        assert_eq!(15, block_cache.entries.len());
+        assert!(block_cache.entries.get(&(block_size as u32)).is_none());
+
+        assert_eq!(14, block_cache.score_list.len());
+        assert_eq!(
+            2 * block_size as u64,
+            unsafe { &*block_cache.score_list.front().unwrap().get() }.wal_offset()
+        );
+
+        block_cache.remove_by(15 * block_size as u64);
+        assert_eq!(14, block_cache.entries.len());
+        assert!(block_cache.entries.get(&(15 * block_size as u32)).is_none());
+
+        assert_eq!(13, block_cache.score_list.len());
+        assert_eq!(
+            14 * block_size as u64,
+            unsafe { &*block_cache.score_list.back().unwrap().get() }.wal_offset()
+        );
     }
 }

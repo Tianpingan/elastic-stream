@@ -1,7 +1,7 @@
 use core::slice::SlicePattern;
-use std::io::IoSlice;
+use std::{io::IoSlice, ops::ControlFlow};
 
-use bytes::Buf;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub struct BytesSliceCursor<'a> {
     bufs: &'a mut [IoSlice<'a>],
@@ -33,6 +33,32 @@ impl<'a> Buf for BytesSliceCursor<'a> {
     }
 }
 
+pub fn advance_bytes(bufs: &mut [Bytes], mut n: usize) -> Bytes {
+    let mut advanced_buf = BytesMut::with_capacity(n);
+    bufs.iter_mut().try_for_each(|buf| {
+        if n == 0 {
+            return ControlFlow::Break(buf);
+        }
+        let to_advance = usize::min(n, buf.len());
+        advanced_buf.put(buf.copy_to_bytes(to_advance));
+        n -= to_advance;
+        ControlFlow::Continue(())
+    });
+    advanced_buf.freeze()
+}
+
+pub fn vec_bytes_to_bytes(vec_bytes: &Vec<Bytes>) -> Bytes {
+    let mut size = 0;
+    for bytes in vec_bytes.iter() {
+        size += bytes.len();
+    }
+    let mut bytes_mut = BytesMut::with_capacity(size);
+    for bytes in vec_bytes {
+        bytes_mut.extend_from_slice(&bytes[..]);
+    }
+    bytes_mut.freeze()
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -54,5 +80,15 @@ mod tests {
         assert_eq!(4, cursor.remaining());
         assert_eq!(cursor.get_u8(), b'c');
         assert_eq!(cursor.get_u8(), b'd');
+    }
+
+    #[test]
+    fn test_advance_bytes() {
+        let buf1 = Bytes::copy_from_slice(b"abc");
+        let buf2 = Bytes::copy_from_slice(b"def");
+        let mut buffers = vec![buf1, buf2];
+        super::advance_bytes(&mut buffers, 4);
+        let remaining: usize = buffers.iter().map(|buf| buf.len()).sum();
+        assert_eq!(2, remaining);
     }
 }

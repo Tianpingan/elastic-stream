@@ -1,5 +1,6 @@
 name: Nightly Build
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 20 * * *'
 
@@ -8,7 +9,7 @@ jobs:
     name: Build and Push Placement Driver Images
     strategy:
       matrix:
-        go-version: [ "1.20" ]
+        go-version: [ "1.21" ]
         platform: [ "ubuntu-latest" ]
     runs-on: ${{ matrix.platform }}
     defaults:
@@ -26,6 +27,9 @@ jobs:
           restore-keys: |
             ${{matrix.platform}}-${{matrix.go-version}}-pd-nightly-
             ${{matrix.platform}}-${{matrix.go-version}}-pd-
+      - name: Install flatc
+        run: |
+          sudo ../scripts/try_install_flatc.sh
       - name: Login to Docker Hub
         uses: docker/login-action@v2
         with:
@@ -33,3 +37,92 @@ jobs:
           password: ${{ secrets.DOCKERHUB_READ_WRITE_TOKEN }}
       - name: Build and Push Nightly Images
         run: make manifest-list GO_VERSION=${{ matrix.go-version }} VERSION=nightly ALL_PLATFORMS=linux/amd64
+
+  elastic-stream-and-long-running-images:
+    name: Build and Push Elastic Stream and Long Running Images
+    strategy:
+      matrix:
+        go-version: ["1.21"]
+        platform: ["ubuntu-22.04"]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # fetch all history so that git describe works
+
+      - name: Go Cache
+        uses: actions/cache@v3
+        with:
+          path: ./pd/.go/cache
+          key: ${{matrix.platform}}-${{matrix.go-version}}-pd-release-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{matrix.platform}}-${{matrix.go-version}}-pd-release-
+            ${{matrix.platform}}-${{matrix.go-version}}-pd-
+      - name: Install flatc
+        run: |
+          sudo ./scripts/try_install_flatc.sh
+      - name: Build Placement Driver Debian Packages
+        working-directory: ./pd
+        run: make all-deb GO_VERSION=${{ matrix.go-version }} ALL_PLATFORMS=linux/amd64
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.4.0
+        with:
+          prefix-key: ""
+          env-vars: ""
+      - name: Install Deps
+        run: |
+          sudo ./scripts/install_deps.sh
+          cargo install cross --git https://github.com/cross-rs/cross
+      - name: Build Range Server Debian Packages
+        run: |
+          make all-deb PROFILE=release ALL_PLATFORMS=linux/amd64
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Build SDK
+        working-directory: ./sdks
+        run: |
+          ./build.sh
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: elasticstream
+          password: ${{ secrets.DOCKERHUB_READ_WRITE_TOKEN }}
+      - name: Build Docker Image
+        working-directory: ./dist/docker
+        run: |
+          ./build-nightly.sh
+
+  upgrade-helm-chart:
+    name: Upgrade helm chart on private k3s
+    runs-on: private-k3s
+    needs: [elastic-stream-and-long-running-images]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Update Helm Chart
+        working-directory: ./dist/helm-chart
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.DEV_KUBE_CONFIG_DATA }}
+        run: |
+          ./upgrade.sh
+
+  upgrade-chaos-mesh:
+    name: Upgrade chaos mesh on private k3s
+    runs-on: private-k3s
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Upgrade chaos-mesh
+        working-directory: ./dist/chaos-mesh
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.DEV_KUBE_CONFIG_DATA }}
+        run: |
+          ./upgrade.sh

@@ -1,9 +1,6 @@
-use log::{error, warn};
-use std::collections::BTreeMap;
-
-use model::Batch;
-
 use crate::error::ServiceError;
+use log::{error, warn};
+use model::Batch;
 
 /// Append Request Window ensures append requests of a stream range are dispatched to store in order.
 ///
@@ -22,15 +19,14 @@ use crate::error::ServiceError;
 /// * The other requests should be responded with a `ServiceError::OffsetInWindow`.
 #[derive(Debug)]
 pub(crate) struct Window {
+    /// Identifier of the window. Currently is in form of {stream-id}#{range-index}.
     log_ident: String,
+
     /// The barrier offset, the requests beyond this offset should be blocked.
     next: u64,
 
     /// The committed offset means all records prior to this offset are already persisted to store.
     committed: u64,
-
-    /// Submitted request offset to batch size.
-    submitted: BTreeMap<u64, u32>,
 }
 
 impl Window {
@@ -38,7 +34,6 @@ impl Window {
         Self {
             log_ident,
             next,
-            submitted: BTreeMap::new(),
             // The initial commit offset is the same as the next offset.
             committed: next,
         }
@@ -50,11 +45,6 @@ impl Window {
 
     pub(crate) fn committed(&self) -> u64 {
         self.committed
-    }
-
-    pub(crate) fn reset(&mut self, offset: u64) {
-        self.next = offset;
-        self.committed = offset;
     }
 
     /// Checks the request with the given offset is ready to be dispatched.
@@ -103,49 +93,22 @@ impl Window {
             );
             return Err(ServiceError::OffsetOutOfOrder);
         }
-
-        self.submitted.insert(request.offset(), request.len());
         // Expected request to be dispatched, just advance the next offset and go.
         self.next += request.len() as u64;
         Ok(())
     }
 
-    /// Commits the request with the given offset, and wakes up the subsequent request if exists.
-    ///
-    /// Note that this method will be called in the bootstrap phase to init the committed and next offset.
+    /// Move the committed offset.
     ///
     /// # Arguments
-    /// * `offset` - the base offset of record batch to be committed.
+    /// * `value` - the records whose offsets prior to `value` are all persisted.
     ///
     /// # Return
     /// * the committed offset.
-    pub(crate) fn commit(&mut self, offset: u64) -> u64 {
-        // The given offset to commit should be equal to the `committed` offset.
-        debug_assert!(
-            offset == self.committed,
-            "{}Unexpected commit call, the offset should be equal to the committed offset, offset: {}, committed: {}",
-            self.log_ident,
-            offset,
-            self.committed);
-
-        // The submitted map should not be empty.
-        debug_assert!(
-            !self.submitted.is_empty(),
-            "{}Must check-barrier prior to commit",
-            self.log_ident
-        );
-
-        if let Some((first_key, len)) = self.submitted.pop_first() {
-            debug_assert!(
-                first_key == offset,
-                "{}Unexpected commit call, the offset should be the first key of the submitted map, offset: {}, first_key: {}",
-                self.log_ident,
-                offset,
-                first_key);
-
-            self.committed = offset + len as u64;
+    pub(crate) fn commit(&mut self, value: u64) -> u64 {
+        if value > self.committed {
+            self.committed = value;
         }
-
         self.committed
     }
 }
@@ -179,7 +142,7 @@ mod tests {
 
     impl PartialOrd for Foo {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            other.offset.partial_cmp(&self.offset)
+            Some(self.cmp(other))
         }
     }
 
@@ -205,9 +168,9 @@ mod tests {
         assert_eq!(2, window.next());
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_check_barrier() {
+    async fn test_check_barrier() {
         let mut window = super::Window::new(String::from(""), 0);
         let foo1 = Foo::new(0);
         let foo2 = Foo::new(2);
@@ -221,11 +184,14 @@ mod tests {
         // foo1 will be accepted.
         assert!(window.check_barrier(&foo1).is_ok());
         assert_eq!(2, window.next());
+        assert_eq!(0, window.committed());
         // Now, foo2 will be accepted.
         assert!(window.check_barrier(&foo2).is_ok());
+        assert_eq!(0, window.committed());
 
         // Commit foo2, and foo1 will be committed implicitly.
-        assert_eq!(4, window.commit(2));
+        assert_eq!(4, window.commit(4));
+        assert_eq!(4, window.committed());
 
         // Now, foo1 will be rejected because the offset is already committed, the error is OffsetCommitted.
         assert!(matches!(

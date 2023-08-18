@@ -1,5 +1,6 @@
 use bytes::{Buf, BufMut, BytesMut};
 use derivative::Derivative;
+use log::error;
 use nix::fcntl;
 use std::{
     cmp::Ordering,
@@ -92,7 +93,7 @@ pub(crate) struct SegmentDescriptor {
 /// Write-ahead-log segment file status.
 ///
 /// `Status` indicates the opcode allowed on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Status {
     // Once a `LogSegmentFile` is constructed, there is no file in fs yet.
     // Need to `open` with `O_CREATE` flag.
@@ -120,7 +121,7 @@ pub(crate) enum Status {
     Recycled,
 
     // Rename the recycled segment file.
-    RenameAt,
+    RenameAt(CString),
 }
 
 impl Display for LogSegment {
@@ -161,7 +162,7 @@ impl Display for Status {
             Self::Recycled => {
                 write!(f, "recycled")
             }
-            Self::RenameAt => {
+            Self::RenameAt(..) => {
                 write!(f, "rename")
             }
         }
@@ -225,9 +226,12 @@ impl LogSegment {
                     .map_err(|e| StoreError::InvalidPath(e.to_string()))?,
             ))?;
         let metadata = file.metadata()?;
+        let file_len = metadata.len();
 
-        let status = if self.size != metadata.len() {
-            debug_assert!(0 == metadata.len(), "LogSegmentFile is corrupted");
+        let status = if self.size == file_len {
+            // We assume the log segment file is read-only. The recovery procedure would update status accordingly.
+            Status::Read
+        } else if 0 == file_len {
             fcntl::fallocate(
                 file.as_raw_fd(),
                 fcntl::FallocateFlags::empty(),
@@ -237,8 +241,11 @@ impl LogSegment {
             .map_err(|errno| StoreError::System(errno as i32))?;
             Status::ReadWrite
         } else {
-            // We assume the log segment file is read-only. The recovery/apply procedure would update status accordingly.
-            Status::Read
+            error!(
+                "Unexpected WAL segment file length: expecting {}, actual: {file_len}; Did you modified 'store.segment-size'?",
+                self.size
+            );
+            return Err(StoreError::DataCorrupted);
         };
 
         self.status = status;
@@ -306,16 +313,33 @@ impl LogSegment {
         }
     }
 
+    /// Calculate checksum of the record payload placed in log segment file.
+    ///
+    /// The algorithm includes two steps:
+    /// * Step-1: calculate CRC32 of the payload slices as crc0;
+    /// * Step-2: crc32([crc0, file-offset]);
+    ///
+    /// This algorithm makes particular sense in case the log segment files are recycled.
+    pub fn checksum_record<T, U>(payload: U, file_offset: u64) -> u32
+    where
+        U: AsRef<[T]>,
+        T: AsRef<[u8]>,
+    {
+        let io_vec = payload.as_ref().iter().map(|buf| buf.as_ref());
+
+        let payload_crc = util::crc32::crc32_vectored(io_vec);
+        let mut buf = BytesMut::with_capacity(4 + 8);
+        buf.put_u32(payload_crc);
+        buf.put_u64(file_offset);
+        util::crc32::crc32(&buf[..])
+    }
+
     pub(crate) fn append_record(
         &mut self,
         writer: &mut AlignedBufWriter,
         payload: &[u8],
     ) -> Result<u64, StoreError> {
-        let crc = util::crc32::crc32(payload);
-        let mut total_buf = BytesMut::with_capacity(4 + 8);
-        total_buf.put_u32(crc);
-        total_buf.put_u64(self.wal_offset);
-        let crc = util::crc32::crc32(total_buf);
+        let crc = Self::checksum_record([payload], self.wal_offset);
         let length_type = RecordType::Full.with_length(payload.len() as u32);
         writer.write_u32(crc)?;
         writer.write_u32(length_type)?;
@@ -519,18 +543,13 @@ impl Drop for LogSegment {
 
 impl PartialOrd for LogSegment {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.wal_offset.partial_cmp(&other.wal_offset)
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for LogSegment {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.partial_cmp(other) {
-            Some(res) => res,
-            None => {
-                unreachable!("Should not reach here");
-            }
-        }
+        self.wal_offset.cmp(&other.wal_offset)
     }
 }
 
@@ -579,7 +598,7 @@ mod tests {
         let pos = segment.append_record(&mut buf_writer, &data)?;
         assert_eq!(pos, 4 + 4 + data.len() as u64);
 
-        let buffers = buf_writer.take();
+        let buffers = buf_writer.take(1024);
         let buf = buffers.first().unwrap();
         let crc = buf.read_u32(0)?;
         let ckm = util::crc32::crc32(&data);
@@ -608,7 +627,7 @@ mod tests {
         let wal_offset = 1024 * 1024;
 
         // Generate some random data
-        let buf_w = AlignedBuf::new(wal_offset, 4 * alignment as usize, alignment).unwrap();
+        let buf_w = AlignedBuf::new(wal_offset, 4 * alignment, alignment).unwrap();
 
         rand::thread_rng().fill_bytes(buf_w.slice_mut(..));
         buf_w.increase_written(buf_w.capacity);
@@ -620,7 +639,7 @@ mod tests {
             &config,
             wal_offset,
             1024 * 1024,
-            &segment_file_path.as_path(),
+            segment_file_path.as_path(),
         )
         .unwrap();
         segment.open().unwrap();
@@ -636,10 +655,7 @@ mod tests {
         segment
             .read_exact_at(&mut buf, alignment as u64 + 2)
             .unwrap();
-        assert_eq!(
-            &buf,
-            &buf_w.slice((alignment + 2) as usize..(alignment + 2 + 5) as usize)[..]
-        );
+        assert_eq!(&buf, &buf_w.slice((alignment + 2)..(alignment + 2 + 5))[..]);
 
         let buf_v = segment
             .block_cache
@@ -653,10 +669,10 @@ mod tests {
         assert_eq!(buf_v.len(), 1);
         let buf = buf_v.first().unwrap();
         assert_eq!(buf.wal_offset, segment.wal_offset + alignment as u64);
-        assert_eq!(buf.limit(), alignment as usize);
+        assert_eq!(buf.limit(), { alignment });
         assert_eq!(
             buf.slice(..),
-            buf_w.slice(alignment as usize..(alignment + alignment) as usize)
+            buf_w.slice(alignment..(alignment + alignment))
         );
 
         // Read some bytes cross the page boundary, and test whether the whole two pages is cached.
@@ -666,7 +682,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             &buf,
-            &buf_w.slice((alignment * 3 - 2) as usize..(alignment * 3 - 2 + 5) as usize)[..]
+            &buf_w.slice((alignment * 3 - 2)..(alignment * 3 - 2 + 5))[..]
         );
 
         let buf_v = segment
@@ -680,10 +696,7 @@ mod tests {
             .unwrap();
         assert_eq!(buf_v.len(), 1);
         let buf = buf_v.first().unwrap();
-        assert_eq!(
-            buf.slice(..),
-            buf_w.slice((alignment * 2) as usize..(alignment * 4) as usize)
-        );
+        assert_eq!(buf.slice(..), buf_w.slice((alignment * 2)..(alignment * 4)));
         Ok(())
     }
 
@@ -724,10 +737,10 @@ mod tests {
             // Case one: the last page is already cached individually.
             segment.written = 4 * alignment as u64;
             // Load the first three pages.
-            let mut buf = [0u8; 3 * 4096 as usize];
+            let mut buf = [0u8; 3 * 4096_usize];
             segment.read_exact_at(&mut buf, 0).unwrap();
             // Load the last page
-            let mut buf = [0u8; 4096 as usize];
+            let mut buf = [0u8; 4096_usize];
             segment
                 .read_exact_at(&mut buf, 3 * alignment as u64)
                 .unwrap();
@@ -743,7 +756,7 @@ mod tests {
             assert_eq!(buf_v.len(), 1);
             let buf = buf_v.first().unwrap();
             assert_eq!(buf.wal_offset, wal_offset);
-            assert_eq!(buf.limit(), alignment as usize * 3);
+            assert_eq!(buf.limit(), alignment * 3);
 
             let buf_v = segment
                 .block_cache
@@ -756,8 +769,8 @@ mod tests {
                 .unwrap();
             assert_eq!(buf_v.len(), 1);
             let buf = buf_v.first().unwrap();
-            assert_eq!(buf.limit(), alignment as usize);
-            assert_eq!(buf.capacity, alignment as usize);
+            assert_eq!(buf.limit(), { alignment });
+            assert_eq!(buf.capacity, { alignment });
 
             // Clear the cache
             segment.block_cache.remove(|t| t.wal_offset() >= wal_offset);
@@ -766,10 +779,10 @@ mod tests {
         {
             // Case two: the last page is already cached individually, but some dirty cache is loaded.
             // Load the first three pages.
-            let mut buf = [0u8; 3 * 4096 as usize];
+            let mut buf = [0u8; 3 * 4096_usize];
             segment.read_exact_at(&mut buf, 0).unwrap();
             // Load the last page and a dirty page
-            let mut buf = [0u8; 4096 * 2 as usize];
+            let mut buf = [0u8; 4096 * 2_usize];
             segment
                 .read_exact_at(&mut buf, 3 * alignment as u64)
                 .unwrap();
@@ -785,13 +798,13 @@ mod tests {
             assert_eq!(buf_v.len(), 1);
             let buf = buf_v.first().unwrap();
             assert_eq!(buf.wal_offset, wal_offset);
-            assert_eq!(buf.limit(), alignment as usize * 3);
+            assert_eq!(buf.limit(), alignment * 3);
 
             let buf_v = segment
                 .block_cache
                 .try_get_entries(EntryRange::new(
                     wal_offset + 3 * alignment as u64,
-                    1 as u32,
+                    1_u32,
                     alignment,
                 ))
                 .unwrap()
@@ -799,8 +812,8 @@ mod tests {
             assert_eq!(buf_v.len(), 1);
             let buf = buf_v.first().unwrap();
             assert_eq!(buf.wal_offset, wal_offset + 3 * alignment as u64);
-            assert_eq!(buf.limit(), alignment as usize - 1024);
-            assert_eq!(buf.capacity, alignment as usize);
+            assert_eq!(buf.limit(), alignment - 1024);
+            assert_eq!(buf.capacity, { alignment });
 
             // Clear the cache
             segment.block_cache.remove(|t| t.wal_offset() >= wal_offset);
@@ -809,7 +822,7 @@ mod tests {
         {
             // Case three: the last page should be splitted, with dirty cache.
             // Load the all the four pages.
-            let mut buf = [0u8; 4 * 4096 as usize];
+            let mut buf = [0u8; 4 * 4096_usize];
             segment.read_exact_at(&mut buf, 0).unwrap();
 
             segment.written = 3 * alignment as u64 + 1024;
@@ -823,21 +836,21 @@ mod tests {
             assert_eq!(buf_v.len(), 1);
             let buf = buf_v.first().unwrap();
             assert_eq!(buf.wal_offset, wal_offset);
-            assert_eq!(buf.limit(), alignment as usize * 3);
+            assert_eq!(buf.limit(), alignment * 3);
 
             let buf_v = segment
                 .block_cache
                 .try_get_entries(EntryRange::new(
                     wal_offset + 3 * alignment as u64,
-                    1024 as u32,
+                    1024_u32,
                     alignment,
                 ))
                 .unwrap()
                 .unwrap();
             assert_eq!(buf_v.len(), 1);
             let buf = buf_v.first().unwrap();
-            assert_eq!(buf.limit(), 1024 as usize);
-            assert_eq!(buf.capacity, alignment as usize);
+            assert_eq!(buf.limit(), 1024_usize);
+            assert_eq!(buf.capacity, { alignment });
 
             // Clear the cache
             segment.block_cache.remove(|t| t.wal_offset() >= wal_offset);

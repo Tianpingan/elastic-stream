@@ -1,14 +1,8 @@
-use std::{
-    cell::{RefCell, UnsafeCell},
-    net::SocketAddr,
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, net::SocketAddr, rc::Rc, sync::Arc};
 
 use config::Configuration;
+use local_sync::mpsc;
 use log::{info, trace, warn};
-use store::Store;
-use tokio::sync::mpsc;
 use tokio_uring::net::TcpStream;
 use transport::connection::Connection;
 
@@ -17,33 +11,29 @@ use crate::{
     range_manager::RangeManager,
 };
 
-pub(crate) struct Session<S, M> {
+pub(crate) struct Session<M> {
     config: Arc<Configuration>,
     stream: TcpStream,
     addr: SocketAddr,
-    store: Rc<S>,
-    range_manager: Rc<UnsafeCell<M>>,
+    range_manager: Rc<M>,
     connection_tracker: Rc<RefCell<ConnectionTracker>>,
 }
 
-impl<S, M> Session<S, M>
+impl<M> Session<M>
 where
-    S: Store + 'static,
     M: RangeManager + 'static,
 {
     pub(crate) fn new(
         config: Arc<Configuration>,
         stream: TcpStream,
         addr: SocketAddr,
-        store: Rc<S>,
-        range_manager: Rc<UnsafeCell<M>>,
+        range_manager: Rc<M>,
         connection_tracker: Rc<RefCell<ConnectionTracker>>,
     ) -> Self {
         Self {
             config,
             stream,
             addr,
-            store,
             range_manager,
             connection_tracker,
         }
@@ -52,7 +42,6 @@ where
     pub(crate) fn process(self) {
         tokio_uring::spawn(async move {
             Self::process0(
-                self.store,
                 self.range_manager,
                 self.connection_tracker,
                 self.addr,
@@ -64,15 +53,14 @@ where
     }
 
     async fn process0(
-        store: Rc<S>,
-        range_manager: Rc<UnsafeCell<M>>,
+        range_manager: Rc<M>,
         connection_tracker: Rc<RefCell<ConnectionTracker>>,
         peer_address: SocketAddr,
         stream: TcpStream,
         server_config: Arc<Configuration>,
     ) {
         // Channel to transfer responses from handlers to the coroutine that is in charge of response write.
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded::channel();
 
         // Put current connection into connection-tracker, such that when TERM/STOP signal is received,
         // servers send go-away frame to each connection, requesting clients to complete and migrate as soon
@@ -100,12 +88,10 @@ where
                         // Update last read instant.
                         read_idle_handler.on_read();
                         let sender = tx.clone();
-                        let store = Rc::clone(&store);
                         let range_manager = Rc::clone(&range_manager);
                         let mut server_call = ServerCall {
                             request: frame,
                             sender,
-                            store,
                             range_manager,
                         };
                         tokio_uring::spawn(async move {
@@ -144,7 +130,7 @@ where
                                 trace!(
                                     "Response frame[stream-id={}, opcode={}] written to {}",
                                     stream_id,
-                                    opcode,
+                                    opcode.variant_name().unwrap_or("INVALID_OPCODE"),
                                     peer_address
                                 );
                             }
@@ -152,7 +138,7 @@ where
                                 warn!(
                                 "Failed to write response frame[stream-id={}, opcode={}] to {}. Cause: {:?}",
                                 stream_id,
-                                opcode,
+                                opcode.variant_name().unwrap_or("INVALID_OPCODE"),
                                 peer_address,
                                 e
                             );

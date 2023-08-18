@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use crossbeam::channel::Sender;
 use derivative::Derivative;
 use tokio::sync::oneshot;
 
@@ -10,7 +11,7 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct ReadTask {
     /// Stream ID of the record.
-    pub(crate) stream_id: i64,
+    pub(crate) stream_id: u64,
 
     /// Offset, in term of WAL, of the record to read.
     pub(crate) wal_offset: u64,
@@ -26,7 +27,7 @@ pub(crate) struct ReadTask {
 // Each `ReadTask` returns a single fetch result.
 #[derive(Debug)]
 pub struct SingleFetchResult {
-    pub(crate) stream_id: i64,
+    pub(crate) stream_id: u64,
     pub(crate) wal_offset: i64,
     /// The payload of a SingleFetchResult may be splitted into multiple `Bytes`s.
     pub(crate) payload: Vec<Bytes>,
@@ -58,13 +59,13 @@ impl IntoIterator for SingleFetchResult {
 #[derivative(Debug)]
 pub(crate) struct WriteTask {
     /// Stream ID of the record.
-    pub(crate) stream_id: i64,
+    pub(crate) stream_id: u64,
 
     /// Range Index
     pub(crate) range: u32,
 
     /// Logical primary index offset
-    pub(crate) offset: i64,
+    pub(crate) offset: u64,
 
     /// Number of nested record entries included in `buffer`.
     pub(crate) len: u32,
@@ -81,7 +82,7 @@ pub(crate) struct WriteTask {
     /// See `components/store/src/io/record.rs`.
     pub(crate) written_len: Option<u32>,
 
-    pub(crate) observer: oneshot::Sender<Result<AppendResult, AppendError>>,
+    pub(crate) observer: Sender<Result<AppendResult, AppendError>>,
 }
 
 impl WriteTask {

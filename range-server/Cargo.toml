@@ -1,10 +1,14 @@
 [package]
 name = "range-server"
-version = "0.1.0"
+version = { workspace = true }
+authors = { workspace = true }
+description = { workspace = true }
+license = { workspace = true }
 edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+alloc = { path = "../components/alloc" }
 anyhow = { workspace = true }
 built = { workspace = true, features = ["chrono", "semver"] }
 byteorder = { workspace = true }
@@ -21,40 +25,54 @@ crossbeam = { workspace = true }
 ctrlc = { workspace = true }
 flatbuffers = { workspace = true }
 futures = { workspace = true }
+gethostname = { workspace = true }
 io-uring = { workspace = true }
 lazy_static = { version = "1.4.0" }
+local-sync = { workspace = true }
 log = { workspace = true }
 log4rs = { workspace = true }
 minstant = { workspace = true }
 model = { path = "../components/model" }
+nix = { workspace = true }
 num_cpus = { workspace = true }
 num_enum = { workspace = true }
+object-storage = { path = "../components/object-storage" }
 observation = { path = "../components/observation" }
+pd-client = { path = "../components/pd-client" }
 polling = { path = "../components/polling" }
 pprof = { workspace = true }
 prometheus = { workspace = true }
 protocol = { path = "../components/protocol" }
+pyroscope = { workspace = true }
+pyroscope_pprofrs = { workspace = true }
 replication = { path = "../components/replication" }
 serde = { workspace = true, features = ["derive"] }
 serde_yaml = { workspace = true }
 store = { path = "../components/store" }
 thiserror = { workspace = true }
-tiered-storage = { path = "../components/tiered-storage" }
 tokio = { workspace = true }
 tokio-uring = { workspace = true }
 transport = { path = "../components/transport" }
 util = { path = "../components/util" }
 
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = "0.5"
-
 [dev-dependencies]
+client = { path = "../components/client", features = ["mock"] }
+env_logger = { workspace = true }
 mock-server = { path = "../components/mock-server" }
 mockall = { workspace = true }
 store = { path = "../components/store", features = ["mock"] }
+ulog = { path = "../components/ulog", features = ["env"] }
 
 [build-dependencies]
 built = { workspace = true, features = ["git2", "chrono", "semver"] }
 
 [features]
+default = ["jemalloc"]
 paranoid = []
+object-first = []
+jemalloc = ["alloc/jemalloc"]
+mem-prof = ["alloc/jemalloc", "alloc/mem-profiling"]
+tcmalloc = ["alloc/tcmalloc"]
+mimalloc = ["alloc/mimalloc"]
+snmalloc = ["alloc/snmalloc-rs"]
+trace = ["store/trace", "observation/trace"]

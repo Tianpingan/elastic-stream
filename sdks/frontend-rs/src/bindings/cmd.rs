@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use jni::objects::GlobalRef;
+use model::error::EsError;
 
 use super::tracing::Tracer;
-use crate::{ClientError, Frontend, Stream};
+use crate::{Frontend, Stream};
 
 pub enum Command<'a> {
     CreateStream {
@@ -45,6 +46,17 @@ pub enum Command<'a> {
         tracer: Tracer,
     },
 
+    Trim {
+        stream: &'a mut Stream,
+        new_start_offset: i64,
+        future: GlobalRef,
+    },
+
+    Delete {
+        stream: &'a mut Stream,
+        future: GlobalRef,
+    },
+
     CloseStream {
         stream: &'a mut Stream,
         future: GlobalRef,
@@ -78,11 +90,17 @@ pub enum CallbackCommand {
         future: GlobalRef,
         offset: i64,
     },
+    Trim {
+        future: GlobalRef,
+    },
+    Delete {
+        future: GlobalRef,
+    },
     CloseStream {
         future: GlobalRef,
     },
     ClientError {
         future: GlobalRef,
-        err: ClientError,
+        err: EsError,
     },
 }

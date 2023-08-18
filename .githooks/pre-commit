@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+# Redirect output to stderr.
+exec 1>&2
+
+# Sort dependencies in 'Cargo.toml'
+if ! git diff --cached --diff-filter=ACMR --quiet -- '*Cargo.toml'; then
+	echo "Sorting dependencies in 'Cargo.toml'..."
+	staged_cargo_files=$(git diff --cached --diff-filter=ACMR --name-only -- '*Cargo.toml')
+	make sort-deps
+	git add $staged_cargo_files
+fi
+
+# Run fmt check and clippy
+if ! git diff --cached --diff-filter=ACMR --quiet -- '*.rs'; then
+  echo "Running fmt check for Rust..."
+  cargo fmt --all -- --check
+  echo "Running clippy for Rust..."
+  cargo clippy --all-targets --features=jemalloc -- -D warnings
+fi

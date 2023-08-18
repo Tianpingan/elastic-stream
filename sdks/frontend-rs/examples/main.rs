@@ -1,3 +1,5 @@
+use std::env;
+
 use bytes::{Bytes, BytesMut};
 use frontend::{Frontend, StreamOptions};
 use futures::{future::join_all, FutureExt};
@@ -6,6 +8,7 @@ use model::{record::flat_record::FlatRecordBatch, RecordBatch};
 use tokio::time::{sleep, Duration};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env::set_var("ES_SDK_LOG", "debug");
     frontend::init_log();
     tokio_uring::start(async {
         let frontend = Frontend::new("127.0.0.1:12378")?;
@@ -52,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut bytes = vec_bytes_to_bytes(stream.read(start, end, i32::MAX).await?);
             let records = decode_flat_record_batch(&mut bytes)?;
             assert_eq!(1, records.len());
-            let record = records.iter().next().unwrap();
+            let record = records.first().unwrap();
             assert_eq!(i * 10, record.base_offset());
             assert_eq!(
                 record.payload(),
@@ -69,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let records = decode_flat_record_batch(&mut bytes)?;
             // expect to read 2 record batches
             assert_eq!(2, records.len());
-            for j in 0..2 as i64 {
+            for j in 0..2_i64 {
                 let record = &records[j as usize];
                 assert_eq!((i + j) * 10, record.base_offset());
                 assert_eq!(
@@ -116,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut bytes = vec_bytes_to_bytes(stream.read(start, end, i32::MAX).await?);
             let records = decode_flat_record_batch(&mut bytes)?;
             assert_eq!(1, records.len());
-            let record = records.iter().next().unwrap();
+            let record = records.first().unwrap();
             assert_eq!(i * 10, record.base_offset());
             assert_eq!(
                 record.payload(),

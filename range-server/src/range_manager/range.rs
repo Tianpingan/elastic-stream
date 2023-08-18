@@ -1,7 +1,9 @@
 use std::fmt;
 
-use log::{info, trace, warn};
+use log::info;
 use model::range::RangeMetadata;
+
+use crate::error::ServiceError;
 
 use super::window::Window;
 
@@ -21,7 +23,7 @@ impl Range {
         let log_ident = format!("Range[{}#{}] ", metadata.stream_id(), metadata.index());
         Self {
             log_ident: log_ident.clone(),
-            window: if metadata.is_sealed() {
+            window: if metadata.has_end() {
                 None
             } else {
                 Some(Window::new(log_ident, metadata.start()))
@@ -31,43 +33,34 @@ impl Range {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn committed(&self) -> Option<u64> {
         self.committed
     }
 
-    pub(crate) fn reset(&mut self, offset: u64) {
-        if let Some(window) = self.window_mut() {
-            window.reset(offset);
-        }
-    }
-
-    pub(crate) fn commit(&mut self, offset: u64) {
-        let offset = self.window_mut().map(|window| window.commit(offset));
-
-        if let Some(offset) = offset {
-            if let Some(ref mut committed) = self.committed {
-                if offset <= *committed {
-                    warn!(
-                        "{}Try to commit offset {}, which is less than current committed offset {}",
-                        self.log_ident, offset, *committed
-                    );
-                } else {
-                    trace!(
-                        "{}Committed offset changed from {} to {}",
-                        self.log_ident,
-                        *committed,
-                        offset
-                    );
-                    *committed = offset;
-                }
-                return;
+    /// Move the committed offset
+    /// Arguments:
+    /// - new_committed_offset: the records before the new_committed are persisted.
+    ///     Cause of append handle use async await, so the new_committed_offset may not
+    ///     pass in order, only the larger new_committed_offset will be accepted.
+    pub(crate) fn commit(&mut self, new_committed_offset: u64) -> Result<(), ServiceError> {
+        let new_committed_offset = match self.window_mut() {
+            Some(win) => win.commit(new_committed_offset),
+            None => {
+                return Err(ServiceError::AlreadySealed);
             }
+        };
 
-            if offset >= self.metadata.start() {
-                self.committed = Some(offset);
+        if let Some(ref mut committed) = self.committed {
+            if new_committed_offset > *committed {
+                *committed = new_committed_offset;
             }
+            return Ok(());
         }
+
+        if new_committed_offset >= self.metadata.start() {
+            self.committed = Some(new_committed_offset);
+        }
+        Ok(())
     }
 
     pub(crate) fn seal(&mut self, metadata: &mut RangeMetadata) {
@@ -132,6 +125,30 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_display() -> Result<(), Box<dyn Error>> {
+        let metadata = RangeMetadata::new(0, 0, 0, 0, None);
+        let mut range = super::Range::new(metadata);
+
+        let expected = "Range[stream-id=0, range-index=0], committed=0, next=0";
+        assert_eq!(expected, format!("{}", range));
+
+        match range.window_mut() {
+            Some(win) => {
+                win.check_barrier(&Foo { offset: 0, len: 42 })?;
+            }
+            None => {
+                panic!("Window should not be None");
+            }
+        }
+        range.commit(42)?;
+
+        let expected = "Range[stream-id=0, range-index=0], committed=42, next=42";
+        assert_eq!(expected, format!("{}", range));
+
+        Ok(())
+    }
+
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct Foo {
         offset: u64,
@@ -148,27 +165,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_commit() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn test_commit() -> Result<(), Box<dyn Error>> {
         let metadata = RangeMetadata::new(0, 0, 0, 0, None);
         let mut range = super::Range::new(metadata);
         range
             .window_mut()
             .and_then(|window| window.check_barrier(&Foo { offset: 0, len: 1 }).ok());
-        range.commit(0);
+        range.commit(1)?;
         assert_eq!(range.committed(), Some(1));
 
         Ok(())
     }
 
-    #[test]
-    fn test_seal() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn test_seal() -> Result<(), Box<dyn Error>> {
         let metadata = RangeMetadata::new(0, 0, 0, 0, None);
         let mut range = super::Range::new(metadata.clone());
         range
             .window_mut()
             .and_then(|window| window.check_barrier(&Foo { offset: 0, len: 1 }).ok());
-        range.commit(0);
+        range.commit(1)?;
 
         let mut metadata = RangeMetadata::new(0, 0, 0, 0, Some(1));
         range.seal(&mut metadata);
@@ -180,7 +197,7 @@ mod tests {
         range.seal(&mut metadata);
 
         assert_eq!(range.committed(), Some(1));
-        assert_eq!(false, range.data_complete(), "Data should not be complete");
+        assert!(!range.data_complete(), "Data should not be complete");
 
         Ok(())
     }

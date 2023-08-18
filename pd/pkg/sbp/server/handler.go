@@ -2,7 +2,6 @@ package server
 
 import (
 	"github.com/AutoMQ/pd/api/rpcfb/rpcfb"
-	"github.com/AutoMQ/pd/pkg/sbp/codec/operation"
 	"github.com/AutoMQ/pd/pkg/sbp/protocol"
 )
 
@@ -26,89 +25,125 @@ type Handler interface {
 	UpdateStream(req *protocol.UpdateStreamRequest, resp *protocol.UpdateStreamResponse)
 	// DescribeStream describes the specified stream.
 	DescribeStream(req *protocol.DescribeStreamRequest, resp *protocol.DescribeStreamResponse)
+	// TrimStream trims the specified stream.
+	TrimStream(req *protocol.TrimStreamRequest, resp *protocol.TrimStreamResponse)
 	// ReportMetrics reports metrics to pd.
 	ReportMetrics(req *protocol.ReportMetricsRequest, resp *protocol.ReportMetricsResponse)
 	// DescribePDCluster describes pd cluster membership.
 	DescribePDCluster(req *protocol.DescribePDClusterRequest, resp *protocol.DescribePDClusterResponse)
+	// CommitObject commits an object.
+	CommitObject(req *protocol.CommitObjectRequest, resp *protocol.CommitObjectResponse)
+	// ListResource lists resources.
+	ListResource(req *protocol.ListResourceRequest, resp *protocol.ListResourceResponse)
+	// WatchResource watches resources.
+	WatchResource(req *protocol.WatchResourceRequest, resp *protocol.WatchResourceResponse)
 }
 
 var (
-	_actionMap = map[operation.Operation]Action{
-		{Code: operation.OpHeartbeat}: {
+	_actionMap = map[rpcfb.OperationCode]Action{
+		rpcfb.OperationCodeHEARTBEAT: {
 			newReq:  func() protocol.InRequest { return &protocol.HeartbeatRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.HeartbeatResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.Heartbeat(req.(*protocol.HeartbeatRequest), resp.(*protocol.HeartbeatResponse))
 			},
 		},
-		{Code: operation.OpAllocateID}: {
+		rpcfb.OperationCodeALLOCATE_ID: {
 			newReq:  func() protocol.InRequest { return &protocol.IDAllocationRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.IDAllocationResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.AllocateID(req.(*protocol.IDAllocationRequest), resp.(*protocol.IDAllocationResponse))
 			},
 		},
-		{Code: operation.OpListRange}: {
+		rpcfb.OperationCodeLIST_RANGE: {
 			newReq:  func() protocol.InRequest { return &protocol.ListRangeRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.ListRangeResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.ListRange(req.(*protocol.ListRangeRequest), resp.(*protocol.ListRangeResponse))
 			},
 		},
-		{Code: operation.OpSealRange}: {
+		rpcfb.OperationCodeSEAL_RANGE: {
 			newReq:  func() protocol.InRequest { return &protocol.SealRangeRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.SealRangeResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.SealRange(req.(*protocol.SealRangeRequest), resp.(*protocol.SealRangeResponse))
 			},
 		},
-		{Code: operation.OpCreateRange}: {
+		rpcfb.OperationCodeCREATE_RANGE: {
 			newReq:  func() protocol.InRequest { return &protocol.CreateRangeRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.CreateRangeResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.CreateRange(req.(*protocol.CreateRangeRequest), resp.(*protocol.CreateRangeResponse))
 			},
 		},
-		{Code: operation.OpCreateStream}: {
+		rpcfb.OperationCodeCREATE_STREAM: {
 			newReq:  func() protocol.InRequest { return &protocol.CreateStreamRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.CreateStreamResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.CreateStream(req.(*protocol.CreateStreamRequest), resp.(*protocol.CreateStreamResponse))
 			},
 		},
-		{Code: operation.OpDeleteStream}: {
+		rpcfb.OperationCodeDELETE_STREAM: {
 			newReq:  func() protocol.InRequest { return &protocol.DeleteStreamRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.DeleteStreamResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.DeleteStream(req.(*protocol.DeleteStreamRequest), resp.(*protocol.DeleteStreamResponse))
 			},
 		},
-		{Code: operation.OpUpdateStream}: {
+		rpcfb.OperationCodeUPDATE_STREAM: {
 			newReq:  func() protocol.InRequest { return &protocol.UpdateStreamRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.UpdateStreamResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.UpdateStream(req.(*protocol.UpdateStreamRequest), resp.(*protocol.UpdateStreamResponse))
 			},
 		},
-		{Code: operation.OpDescribeStream}: {
+		rpcfb.OperationCodeDESCRIBE_STREAM: {
 			newReq:  func() protocol.InRequest { return &protocol.DescribeStreamRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.DescribeStreamResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.DescribeStream(req.(*protocol.DescribeStreamRequest), resp.(*protocol.DescribeStreamResponse))
 			},
 		},
-		{Code: operation.OpReportMetrics}: {
+		rpcfb.OperationCodeTRIM_STREAM: {
+			newReq:  func() protocol.InRequest { return &protocol.TrimStreamRequest{} },
+			newResp: func() protocol.OutResponse { return &protocol.TrimStreamResponse{} },
+			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
+				handler.TrimStream(req.(*protocol.TrimStreamRequest), resp.(*protocol.TrimStreamResponse))
+			},
+		},
+		rpcfb.OperationCodeREPORT_METRICS: {
 			newReq:  func() protocol.InRequest { return &protocol.ReportMetricsRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.ReportMetricsResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.ReportMetrics(req.(*protocol.ReportMetricsRequest), resp.(*protocol.ReportMetricsResponse))
 			},
 		},
-		{Code: operation.OpDescribePDCluster}: {
+		rpcfb.OperationCodeDESCRIBE_PLACEMENT_DRIVER: {
 			newReq:  func() protocol.InRequest { return &protocol.DescribePDClusterRequest{} },
 			newResp: func() protocol.OutResponse { return &protocol.DescribePDClusterResponse{} },
 			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
 				handler.DescribePDCluster(req.(*protocol.DescribePDClusterRequest), resp.(*protocol.DescribePDClusterResponse))
+			},
+		},
+		rpcfb.OperationCodeCOMMIT_OBJECT: {
+			newReq:  func() protocol.InRequest { return &protocol.CommitObjectRequest{} },
+			newResp: func() protocol.OutResponse { return &protocol.CommitObjectResponse{} },
+			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
+				handler.CommitObject(req.(*protocol.CommitObjectRequest), resp.(*protocol.CommitObjectResponse))
+			},
+		},
+		rpcfb.OperationCodeLIST_RESOURCE: {
+			newReq:  func() protocol.InRequest { return &protocol.ListResourceRequest{} },
+			newResp: func() protocol.OutResponse { return &protocol.ListResourceResponse{} },
+			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
+				handler.ListResource(req.(*protocol.ListResourceRequest), resp.(*protocol.ListResourceResponse))
+			},
+		},
+		rpcfb.OperationCodeWATCH_RESOURCE: {
+			newReq:  func() protocol.InRequest { return &protocol.WatchResourceRequest{} },
+			newResp: func() protocol.OutResponse { return &protocol.WatchResourceResponse{} },
+			act: func(handler Handler, req protocol.InRequest, resp protocol.OutResponse) {
+				handler.WatchResource(req.(*protocol.WatchResourceRequest), resp.(*protocol.WatchResourceResponse))
 			},
 		},
 	}
@@ -136,14 +171,12 @@ type Action struct {
 }
 
 // GetAction returns the action for the specified operation
-func GetAction(op operation.Operation) *Action {
+func GetAction(op rpcfb.OperationCode) *Action {
 	if action, ok := _actionMap[op]; ok {
 		return &action
 	}
-	if op.Code == operation.OpAppend ||
-		op.Code == operation.OpFetch ||
-		op.Code == operation.OpTrimStream {
-		return &_unsupportedAction
+	if _, ok := rpcfb.EnumNamesOperationCode[op]; !ok || op == rpcfb.OperationCodeUNKNOWN {
+		return &_unknownAction
 	}
-	return &_unknownAction
+	return &_unsupportedAction
 }

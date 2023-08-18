@@ -1,14 +1,16 @@
 use bytes::{Bytes, BytesMut};
+use model::object::ObjectMetadata;
 use model::request::fetch::FetchRequest;
-use model::stream::StreamMetadata;
 use model::{
-    client_role::ClientRole, range::RangeMetadata, range_server::RangeServer, ListRangeCriteria,
+    range::RangeMetadata, range_server::RangeServer, replica::RangeProgress, ListRangeCriteria,
 };
 use protocol::rpc::header::{
-    AppendRequestT, CreateRangeRequestT, CreateStreamRequestT,
-    DescribePlacementDriverClusterRequestT, DescribeStreamRequestT, FetchRequestT,
-    HeartbeatRequestT, IdAllocationRequestT, ListRangeCriteriaT, ListRangeRequestT,
-    RangeServerMetricsT, RangeT, ReportMetricsRequestT, SealKind, SealRangeRequestT,
+    AppendRequestT, ClientRole, CommitObjectRequestT, CreateRangeRequestT, CreateStreamRequestT,
+    DeleteStreamRequestT, DescribePlacementDriverClusterRequestT, DescribeStreamRequestT,
+    FetchRequestT, HeartbeatRequestT, IdAllocationRequestT, ListRangeCriteriaT, ListRangeRequestT,
+    ListResourceRequestT, ObjT, RangeProgressT, RangeServerMetricsT, RangeT, ReportMetricsRequestT,
+    ReportRangeProgressRequestT, ResourceType, SealKind, SealRangeRequestT, StreamT,
+    TrimStreamRequestT, UpdateStreamRequestT, WatchResourceRequestT,
 };
 use std::fmt;
 use std::time::Duration;
@@ -35,7 +37,7 @@ pub enum Headers {
     },
 
     CreateStream {
-        stream_metadata: StreamMetadata,
+        stream: StreamT,
     },
 
     DescribeStream {
@@ -89,6 +91,44 @@ pub enum Headers {
         range_missing_replica_cnt: i16,
         range_active_cnt: i16,
     },
+
+    ReportRangeProgress {
+        range_server: RangeServer,
+        range_progress: Vec<RangeProgress>,
+    },
+
+    CommitObject {
+        metadata: ObjectMetadata,
+    },
+
+    ListResource {
+        resource_type: Vec<ResourceType>,
+        limit: i32,
+        continuation: Option<Bytes>,
+    },
+
+    WatchResource {
+        resource_type: Vec<ResourceType>,
+        version: i64,
+    },
+
+    UpdateStream {
+        stream_id: u64,
+        replica_count: Option<u8>,
+        ack_count: Option<u8>,
+        epoch: Option<u64>,
+    },
+
+    TrimStream {
+        stream_id: u64,
+        epoch: u64,
+        min_offset: u64,
+    },
+
+    DeleteStream {
+        stream_id: u64,
+        epoch: u64,
+    },
 }
 
 impl From<&Request> for Bytes {
@@ -103,16 +143,15 @@ impl From<&Request> for Bytes {
                 let range_server = range_server.as_ref().map(|server| Box::new(server.into()));
                 let mut heartbeat_request = HeartbeatRequestT::default();
                 heartbeat_request.client_id = Some(client_id.to_owned());
-                heartbeat_request.client_role = role.into();
+                heartbeat_request.client_role = *role;
                 heartbeat_request.range_server = range_server;
                 let heartbeat = heartbeat_request.pack(&mut builder);
                 builder.finish(heartbeat, None);
             }
 
-            Headers::CreateStream { stream_metadata } => {
+            Headers::CreateStream { stream } => {
                 let mut request = CreateStreamRequestT::default();
-                let stream = stream_metadata.into();
-                request.stream = Box::new(stream);
+                request.stream = Box::new(stream.clone());
                 let request = request.pack(&mut builder);
                 builder.finish(request, None);
             }
@@ -172,7 +211,7 @@ impl From<&Request> for Bytes {
                 request.timeout_ms = req.timeout.as_millis() as i32;
                 request.kind = *kind;
                 let mut range_t = RangeT::default();
-                range_t.stream_id = range.stream_id();
+                range_t.stream_id = range.stream_id() as i64;
                 range_t.index = range.index();
                 range_t.epoch = range.epoch() as i64;
                 range_t.start = range.start() as i64;
@@ -242,6 +281,87 @@ impl From<&Request> for Bytes {
                 request.range_server = Some(Box::new(range_server.into()));
                 request.metrics = Some(Box::new(metrics));
 
+                let request = request.pack(&mut builder);
+                builder.finish(request, None);
+            }
+            Headers::ReportRangeProgress {
+                range_server,
+                range_progress: replica_progress,
+            } => {
+                let mut request = ReportRangeProgressRequestT::default();
+                request.timeout_ms = req.timeout.as_millis() as i32;
+                request.range_server = Box::new(range_server.into());
+                request.range_progress =
+                    replica_progress.iter().map(RangeProgressT::from).collect();
+                let request = request.pack(&mut builder);
+                builder.finish(request, None);
+            }
+            Headers::CommitObject { metadata } => {
+                let mut request = CommitObjectRequestT::default();
+                request.timeout_ms = req.timeout.as_millis() as i32;
+                request.object = Some(Box::new(ObjT::from(metadata)));
+                let request = request.pack(&mut builder);
+                builder.finish(request, None);
+            }
+            Headers::ListResource {
+                resource_type,
+                limit,
+                continuation,
+            } => {
+                let mut request = ListResourceRequestT::default();
+                request.timeout_ms = req.timeout.as_millis() as i32;
+                request.resource_type = resource_type.clone();
+                request.limit = *limit;
+                request.continuation = continuation.clone().map(|c| c.to_vec());
+                let request = request.pack(&mut builder);
+                builder.finish(request, None);
+            }
+            Headers::WatchResource {
+                resource_type,
+                version,
+            } => {
+                let mut request = WatchResourceRequestT::default();
+                request.timeout_ms = req.timeout.as_millis() as i32;
+                request.resource_type = resource_type.clone();
+                request.resource_version = *version;
+                let request = request.pack(&mut builder);
+                builder.finish(request, None);
+            }
+            Headers::UpdateStream {
+                stream_id,
+                replica_count,
+                ack_count,
+                epoch,
+            } => {
+                let mut request = UpdateStreamRequestT::default();
+                request.timeout_ms = req.timeout.as_millis() as i32;
+                let mut stream = StreamT::default();
+                stream.stream_id = *stream_id as i64;
+                replica_count.map(|c| stream.replica = c as i8);
+                ack_count.map(|c| stream.ack_count = c as i8);
+                epoch.map(|c| stream.epoch = c as i64);
+                request.stream = Box::new(stream);
+                let request = request.pack(&mut builder);
+                builder.finish(request, None);
+            }
+            Headers::TrimStream {
+                stream_id,
+                epoch,
+                min_offset,
+            } => {
+                let mut request = TrimStreamRequestT::default();
+                request.timeout_ms = req.timeout.as_millis() as i32;
+                request.stream_id = stream_id.to_owned() as i64;
+                request.epoch = epoch.to_owned() as i64;
+                request.min_offset = min_offset.to_owned() as i64;
+                let request = request.pack(&mut builder);
+                builder.finish(request, None);
+            }
+            Headers::DeleteStream { stream_id, epoch } => {
+                let mut request = DeleteStreamRequestT::default();
+                request.timeout_ms = req.timeout.as_millis() as i32;
+                request.stream_id = stream_id.to_owned() as i64;
+                request.epoch = epoch.to_owned() as i64;
                 let request = request.pack(&mut builder);
                 builder.finish(request, None);
             }

@@ -2,7 +2,7 @@ package protocol
 
 import (
 	"github.com/AutoMQ/pd/api/rpcfb/rpcfb"
-	"github.com/AutoMQ/pd/pkg/sbp/codec/format"
+	"github.com/AutoMQ/pd/pkg/sbp/codec"
 	"github.com/AutoMQ/pd/pkg/util/fbutil"
 )
 
@@ -60,7 +60,7 @@ func (se *SystemErrorResponse) marshalFlatBuffer() ([]byte, error) {
 	return fbutil.Marshal(&se.SystemErrorT), nil
 }
 
-func (se *SystemErrorResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (se *SystemErrorResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(se, fmt)
 }
 
@@ -69,7 +69,7 @@ func (se *SystemErrorResponse) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (se *SystemErrorResponse) Unmarshal(fmt format.Format, data []byte) error {
+func (se *SystemErrorResponse) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(se, fmt, data)
 }
 
@@ -81,7 +81,7 @@ func (se *SystemErrorResponse) OK() {
 	se.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// HeartbeatResponse is a response to operation.OpHeartbeat
+// HeartbeatResponse is a response to rpcfb.OperationCodeHEARTBEAT
 type HeartbeatResponse struct {
 	baseMarshaller
 	baseUnmarshaler
@@ -95,7 +95,7 @@ func (hr *HeartbeatResponse) marshalFlatBuffer() ([]byte, error) {
 	return fbutil.Marshal(&hr.HeartbeatResponseT), nil
 }
 
-func (hr *HeartbeatResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (hr *HeartbeatResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(hr, fmt)
 }
 
@@ -104,7 +104,7 @@ func (hr *HeartbeatResponse) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (hr *HeartbeatResponse) Unmarshal(fmt format.Format, data []byte) error {
+func (hr *HeartbeatResponse) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(hr, fmt, data)
 }
 
@@ -116,7 +116,7 @@ func (hr *HeartbeatResponse) OK() {
 	hr.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// IDAllocationResponse is a response to operation.OpAllocateID
+// IDAllocationResponse is a response to rpcfb.OperationCodeALLOCATE_ID
 type IDAllocationResponse struct {
 	baseMarshaller
 	singleResponse
@@ -128,7 +128,7 @@ func (ia *IDAllocationResponse) marshalFlatBuffer() ([]byte, error) {
 	return fbutil.Marshal(&ia.IdAllocationResponseT), nil
 }
 
-func (ia *IDAllocationResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (ia *IDAllocationResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(ia, fmt)
 }
 
@@ -140,21 +140,22 @@ func (ia *IDAllocationResponse) OK() {
 	ia.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// ListRangeResponse is a response to operation.OpListRange
+// ListRangeResponse is a response to rpcfb.OperationCodeLIST_RANGE
 type ListRangeResponse struct {
 	baseMarshaller
+	singleResponse
 
 	rpcfb.ListRangeResponseT
-
-	// HasNext indicates whether there are more responses after this one.
-	HasNext bool
 }
 
 func (lr *ListRangeResponse) marshalFlatBuffer() ([]byte, error) {
+	if lr.Ranges == nil {
+		lr.Ranges = make([]*rpcfb.RangeT, 0)
+	}
 	return fbutil.Marshal(&lr.ListRangeResponseT), nil
 }
 
-func (lr *ListRangeResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (lr *ListRangeResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(lr, fmt)
 }
 
@@ -162,15 +163,11 @@ func (lr *ListRangeResponse) Error(status *rpcfb.StatusT) {
 	lr.Status = status
 }
 
-func (lr *ListRangeResponse) IsEnd() bool {
-	return !lr.HasNext
-}
-
 func (lr *ListRangeResponse) OK() {
 	lr.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// SealRangeResponse is a response to operation.OpSealRange
+// SealRangeResponse is a response to rpcfb.OperationCodeSEAL_RANGE
 type SealRangeResponse struct {
 	baseMarshaller
 	singleResponse
@@ -182,7 +179,7 @@ func (sr *SealRangeResponse) marshalFlatBuffer() ([]byte, error) {
 	return fbutil.Marshal(&sr.SealRangeResponseT), nil
 }
 
-func (sr *SealRangeResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (sr *SealRangeResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(sr, fmt)
 }
 
@@ -194,7 +191,7 @@ func (sr *SealRangeResponse) OK() {
 	sr.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// CreateRangeResponse is a response to operation.OpCreateRange
+// CreateRangeResponse is a response to rpcfb.OperationCodeCREATE_RANGE
 type CreateRangeResponse struct {
 	baseMarshaller
 	singleResponse
@@ -206,7 +203,7 @@ func (cr *CreateRangeResponse) marshalFlatBuffer() ([]byte, error) {
 	return fbutil.Marshal(&cr.CreateRangeResponseT), nil
 }
 
-func (cr *CreateRangeResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (cr *CreateRangeResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(cr, fmt)
 }
 
@@ -218,7 +215,7 @@ func (cr *CreateRangeResponse) OK() {
 	cr.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// CreateStreamResponse is a response to operation.OpCreateStream
+// CreateStreamResponse is a response to rpcfb.OperationCodeCREATE_STREAM
 type CreateStreamResponse struct {
 	baseMarshaller
 	singleResponse
@@ -230,7 +227,7 @@ func (cs *CreateStreamResponse) marshalFlatBuffer() ([]byte, error) {
 	return fbutil.Marshal(&cs.CreateStreamResponseT), nil
 }
 
-func (cs *CreateStreamResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (cs *CreateStreamResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(cs, fmt)
 }
 
@@ -242,7 +239,7 @@ func (cs *CreateStreamResponse) OK() {
 	cs.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// DeleteStreamResponse is a response to operation.OpDeleteStream
+// DeleteStreamResponse is a response to rpcfb.OperationCodeDELETE_STREAM
 type DeleteStreamResponse struct {
 	baseMarshaller
 	singleResponse
@@ -254,7 +251,7 @@ func (ds *DeleteStreamResponse) marshalFlatBuffer() ([]byte, error) {
 	return fbutil.Marshal(&ds.DeleteStreamResponseT), nil
 }
 
-func (ds *DeleteStreamResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (ds *DeleteStreamResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(ds, fmt)
 }
 
@@ -266,7 +263,7 @@ func (ds *DeleteStreamResponse) OK() {
 	ds.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// UpdateStreamResponse is a response to operation.OpUpdateStream
+// UpdateStreamResponse is a response to rpcfb.OperationCodeUPDATE_STREAM
 type UpdateStreamResponse struct {
 	baseMarshaller
 	singleResponse
@@ -275,10 +272,13 @@ type UpdateStreamResponse struct {
 }
 
 func (us *UpdateStreamResponse) marshalFlatBuffer() ([]byte, error) {
+	if us.Stream == nil {
+		us.Stream = &rpcfb.StreamT{}
+	}
 	return fbutil.Marshal(&us.UpdateStreamResponseT), nil
 }
 
-func (us *UpdateStreamResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (us *UpdateStreamResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(us, fmt)
 }
 
@@ -290,7 +290,7 @@ func (us *UpdateStreamResponse) OK() {
 	us.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// DescribeStreamResponse is a response to operation.OpDescribeStream
+// DescribeStreamResponse is a response to rpcfb.OperationCodeDESCRIBE_STREAM
 type DescribeStreamResponse struct {
 	baseMarshaller
 	singleResponse
@@ -302,7 +302,7 @@ func (ds *DescribeStreamResponse) marshalFlatBuffer() ([]byte, error) {
 	return fbutil.Marshal(&ds.DescribeStreamResponseT), nil
 }
 
-func (ds *DescribeStreamResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (ds *DescribeStreamResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(ds, fmt)
 }
 
@@ -314,7 +314,31 @@ func (ds *DescribeStreamResponse) OK() {
 	ds.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// ReportMetricsResponse is a response to operation.OpReportMetrics
+// TrimStreamResponse is a response to rpcfb.OperationCodeTRIM_STREAM
+type TrimStreamResponse struct {
+	baseMarshaller
+	singleResponse
+
+	rpcfb.TrimStreamResponseT
+}
+
+func (ts *TrimStreamResponse) marshalFlatBuffer() ([]byte, error) {
+	return fbutil.Marshal(&ts.TrimStreamResponseT), nil
+}
+
+func (ts *TrimStreamResponse) Marshal(fmt codec.Format) ([]byte, error) {
+	return marshal(ts, fmt)
+}
+
+func (ts *TrimStreamResponse) Error(status *rpcfb.StatusT) {
+	ts.Status = status
+}
+
+func (ts *TrimStreamResponse) OK() {
+	ts.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
+}
+
+// ReportMetricsResponse is a response to rpcfb.OperationCodeREPORT_METRICS
 type ReportMetricsResponse struct {
 	baseMarshaller
 	singleResponse
@@ -326,7 +350,7 @@ func (rm *ReportMetricsResponse) marshalFlatBuffer() ([]byte, error) {
 	return fbutil.Marshal(&rm.ReportMetricsResponseT), nil
 }
 
-func (rm *ReportMetricsResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (rm *ReportMetricsResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(rm, fmt)
 }
 
@@ -338,7 +362,7 @@ func (rm *ReportMetricsResponse) OK() {
 	rm.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }
 
-// DescribePDClusterResponse is a response to operation.OpDescribePDCluster
+// DescribePDClusterResponse is a response to rpcfb.OperationCodeDESCRIBE_PLACEMENT_DRIVER
 type DescribePDClusterResponse struct {
 	baseMarshaller
 	singleResponse
@@ -347,10 +371,14 @@ type DescribePDClusterResponse struct {
 }
 
 func (dpd *DescribePDClusterResponse) marshalFlatBuffer() ([]byte, error) {
+	if dpd.Cluster == nil {
+		dpd.Cluster = &rpcfb.PlacementDriverClusterT{}
+		dpd.Cluster.Nodes = make([]*rpcfb.PlacementDriverNodeT, 0)
+	}
 	return fbutil.Marshal(&dpd.DescribePlacementDriverClusterResponseT), nil
 }
 
-func (dpd *DescribePDClusterResponse) Marshal(fmt format.Format) ([]byte, error) {
+func (dpd *DescribePDClusterResponse) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(dpd, fmt)
 }
 
@@ -360,4 +388,82 @@ func (dpd *DescribePDClusterResponse) Error(status *rpcfb.StatusT) {
 
 func (dpd *DescribePDClusterResponse) OK() {
 	dpd.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
+}
+
+// CommitObjectResponse is a response to rpcfb.OperationCodeCOMMIT_OBJECT
+type CommitObjectResponse struct {
+	baseMarshaller
+	singleResponse
+
+	rpcfb.CommitObjectResponseT
+}
+
+func (co *CommitObjectResponse) marshalFlatBuffer() ([]byte, error) {
+	return fbutil.Marshal(&co.CommitObjectResponseT), nil
+}
+
+func (co *CommitObjectResponse) Marshal(fmt codec.Format) ([]byte, error) {
+	return marshal(co, fmt)
+}
+
+func (co *CommitObjectResponse) Error(status *rpcfb.StatusT) {
+	co.Status = status
+}
+
+func (co *CommitObjectResponse) OK() {
+	co.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
+}
+
+// ListResourceResponse is a response to rpcfb.OperationCodeLIST_RESOURCE
+type ListResourceResponse struct {
+	baseMarshaller
+	singleResponse
+
+	rpcfb.ListResourceResponseT
+}
+
+func (lr *ListResourceResponse) marshalFlatBuffer() ([]byte, error) {
+	if lr.Resources == nil {
+		lr.Resources = make([]*rpcfb.ResourceT, 0)
+	}
+	return fbutil.Marshal(&lr.ListResourceResponseT), nil
+}
+
+func (lr *ListResourceResponse) Marshal(fmt codec.Format) ([]byte, error) {
+	return marshal(lr, fmt)
+}
+
+func (lr *ListResourceResponse) Error(status *rpcfb.StatusT) {
+	lr.Status = status
+}
+
+func (lr *ListResourceResponse) OK() {
+	lr.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
+}
+
+// WatchResourceResponse is a response to rpcfb.OperationCodeWATCH_RESOURCE
+type WatchResourceResponse struct {
+	baseMarshaller
+	singleResponse
+
+	rpcfb.WatchResourceResponseT
+}
+
+func (wr *WatchResourceResponse) marshalFlatBuffer() ([]byte, error) {
+	if wr.Events == nil {
+		wr.Events = make([]*rpcfb.ResourceEventT, 0)
+	}
+	return fbutil.Marshal(&wr.WatchResourceResponseT), nil
+}
+
+func (wr *WatchResourceResponse) Marshal(fmt codec.Format) ([]byte, error) {
+	return marshal(wr, fmt)
+}
+
+func (wr *WatchResourceResponse) Error(status *rpcfb.StatusT) {
+	wr.Status = status
+}
+
+func (wr *WatchResourceResponse) OK() {
+	wr.Status = &rpcfb.StatusT{Code: rpcfb.ErrorCodeOK}
 }

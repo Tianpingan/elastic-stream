@@ -4,8 +4,7 @@ import (
 	"context"
 
 	"github.com/AutoMQ/pd/api/rpcfb/rpcfb"
-	"github.com/AutoMQ/pd/pkg/sbp/codec/format"
-	"github.com/AutoMQ/pd/pkg/sbp/codec/operation"
+	"github.com/AutoMQ/pd/pkg/sbp/codec"
 	"github.com/AutoMQ/pd/pkg/util/fbutil"
 )
 
@@ -28,6 +27,9 @@ type request interface {
 type InRequest interface {
 	request
 	unmarshaler
+
+	// LongPoll returns true if the request is a long poll request.
+	LongPoll() bool
 }
 
 type OutRequest interface {
@@ -35,7 +37,7 @@ type OutRequest interface {
 	marshaller
 
 	// Operation returns the operation of the request.
-	Operation() operation.Operation
+	Operation() rpcfb.OperationCode
 }
 
 // baseRequest is a base implementation of Request
@@ -58,22 +60,30 @@ func (req *baseRequest) Context() context.Context {
 	return req.ctx
 }
 
+type nonLongPollRequest struct{}
+
+func (n nonLongPollRequest) LongPoll() bool {
+	return false
+}
+
 // EmptyRequest is an empty request, used for unrecognized requests
 type EmptyRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 }
 
-func (e EmptyRequest) Unmarshal(_ format.Format, _ []byte) error {
+func (e EmptyRequest) Unmarshal(_ codec.Format, _ []byte) error {
 	_ = e.baseUnmarshaler
 	return nil
 }
 
-// HeartbeatRequest is a request to operation.OpHeartbeat
+// HeartbeatRequest is a request to rpcfb.OperationCodeHEARTBEAT
 type HeartbeatRequest struct {
 	baseRequest
 	baseMarshaller
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.HeartbeatRequestT
 }
@@ -82,7 +92,7 @@ func (hr *HeartbeatRequest) marshalFlatBuffer() ([]byte, error) {
 	return fbutil.Marshal(&hr.HeartbeatRequestT), nil
 }
 
-func (hr *HeartbeatRequest) Marshal(fmt format.Format) ([]byte, error) {
+func (hr *HeartbeatRequest) Marshal(fmt codec.Format) ([]byte, error) {
 	return marshal(hr, fmt)
 }
 
@@ -91,18 +101,19 @@ func (hr *HeartbeatRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (hr *HeartbeatRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (hr *HeartbeatRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(hr, fmt, data)
 }
 
-func (hr *HeartbeatRequest) Operation() operation.Operation {
-	return operation.Operation{Code: operation.OpHeartbeat}
+func (hr *HeartbeatRequest) Operation() rpcfb.OperationCode {
+	return rpcfb.OperationCodeHEARTBEAT
 }
 
-// IDAllocationRequest is a request to operation.OpAllocateID
+// IDAllocationRequest is a request to rpcfb.OperationCodeALLOCATE_ID
 type IDAllocationRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.IdAllocationRequestT
 }
@@ -112,7 +123,7 @@ func (ia *IDAllocationRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (ia *IDAllocationRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (ia *IDAllocationRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(ia, fmt, data)
 }
 
@@ -120,10 +131,11 @@ func (ia *IDAllocationRequest) Timeout() int32 {
 	return ia.TimeoutMs
 }
 
-// ListRangeRequest is a request to operation.OpListRange
+// ListRangeRequest is a request to rpcfb.OperationCodeLIST_RANGE
 type ListRangeRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.ListRangeRequestT
 }
@@ -133,7 +145,7 @@ func (lr *ListRangeRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (lr *ListRangeRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (lr *ListRangeRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(lr, fmt, data)
 }
 
@@ -141,10 +153,11 @@ func (lr *ListRangeRequest) Timeout() int32 {
 	return lr.TimeoutMs
 }
 
-// SealRangeRequest is a request to operation.OpSealRange
+// SealRangeRequest is a request to rpcfb.OperationCodeSEAL_RANGE
 type SealRangeRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.SealRangeRequestT
 }
@@ -154,7 +167,7 @@ func (sr *SealRangeRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (sr *SealRangeRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (sr *SealRangeRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(sr, fmt, data)
 }
 
@@ -162,10 +175,11 @@ func (sr *SealRangeRequest) Timeout() int32 {
 	return sr.TimeoutMs
 }
 
-// CreateRangeRequest is a request to operation.OpCreateRange
+// CreateRangeRequest is a request to rpcfb.OperationCodeCREATE_RANGE
 type CreateRangeRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.CreateRangeRequestT
 }
@@ -175,7 +189,7 @@ func (cr *CreateRangeRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (cr *CreateRangeRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (cr *CreateRangeRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(cr, fmt, data)
 }
 
@@ -183,10 +197,11 @@ func (cr *CreateRangeRequest) Timeout() int32 {
 	return cr.TimeoutMs
 }
 
-// CreateStreamRequest is a request to operation.OpCreateStream
+// CreateStreamRequest is a request to rpcfb.OperationCodeCREATE_STREAM
 type CreateStreamRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.CreateStreamRequestT
 }
@@ -196,7 +211,7 @@ func (cs *CreateStreamRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (cs *CreateStreamRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (cs *CreateStreamRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(cs, fmt, data)
 }
 
@@ -204,10 +219,11 @@ func (cs *CreateStreamRequest) Timeout() int32 {
 	return cs.TimeoutMs
 }
 
-// DeleteStreamRequest is a request to operation.OpDeleteStream
+// DeleteStreamRequest is a request to rpcfb.OperationCodeDELETE_STREAM
 type DeleteStreamRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.DeleteStreamRequestT
 }
@@ -217,7 +233,7 @@ func (ds *DeleteStreamRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (ds *DeleteStreamRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (ds *DeleteStreamRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(ds, fmt, data)
 }
 
@@ -225,10 +241,11 @@ func (ds *DeleteStreamRequest) Timeout() int32 {
 	return ds.TimeoutMs
 }
 
-// UpdateStreamRequest is a request to operation.OpUpdateStream
+// UpdateStreamRequest is a request to rpcfb.OperationCodeUPDATE_STREAM
 type UpdateStreamRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.UpdateStreamRequestT
 }
@@ -238,7 +255,7 @@ func (us *UpdateStreamRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (us *UpdateStreamRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (us *UpdateStreamRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(us, fmt, data)
 }
 
@@ -246,10 +263,11 @@ func (us *UpdateStreamRequest) Timeout() int32 {
 	return us.TimeoutMs
 }
 
-// DescribeStreamRequest is a request to operation.OpDescribeStream
+// DescribeStreamRequest is a request to rpcfb.OperationCodeDESCRIBE_STREAM
 type DescribeStreamRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.DescribeStreamRequestT
 }
@@ -259,7 +277,7 @@ func (ds *DescribeStreamRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (ds *DescribeStreamRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (ds *DescribeStreamRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(ds, fmt, data)
 }
 
@@ -267,10 +285,33 @@ func (ds *DescribeStreamRequest) Timeout() int32 {
 	return ds.TimeoutMs
 }
 
-// ReportMetricsRequest is a request to operation.OpReportMetrics
+// TrimStreamRequest is a request to rpcfb.OperationCodeTRIM_STREAM
+type TrimStreamRequest struct {
+	baseRequest
+	baseUnmarshaler
+	nonLongPollRequest
+
+	rpcfb.TrimStreamRequestT
+}
+
+func (ts *TrimStreamRequest) unmarshalFlatBuffer(data []byte) error {
+	ts.TrimStreamRequestT = *rpcfb.GetRootAsTrimStreamRequest(data, 0).UnPack()
+	return nil
+}
+
+func (ts *TrimStreamRequest) Unmarshal(fmt codec.Format, data []byte) error {
+	return unmarshal(ts, fmt, data)
+}
+
+func (ts *TrimStreamRequest) Timeout() int32 {
+	return ts.TimeoutMs
+}
+
+// ReportMetricsRequest is a request to rpcfb.OperationCodeREPORT_METRICS
 type ReportMetricsRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.ReportMetricsRequestT
 }
@@ -280,18 +321,15 @@ func (rm *ReportMetricsRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (rm *ReportMetricsRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (rm *ReportMetricsRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(rm, fmt, data)
 }
 
-func (rm *ReportMetricsRequest) Timeout() int32 {
-	return 0
-}
-
-// DescribePDClusterRequest is a request to operation.OpDescribePDCluster
+// DescribePDClusterRequest is a request to rpcfb.OperationCodeDESCRIBE_PLACEMENT_DRIVER
 type DescribePDClusterRequest struct {
 	baseRequest
 	baseUnmarshaler
+	nonLongPollRequest
 
 	rpcfb.DescribePlacementDriverClusterRequestT
 }
@@ -301,10 +339,79 @@ func (dpd *DescribePDClusterRequest) unmarshalFlatBuffer(data []byte) error {
 	return nil
 }
 
-func (dpd *DescribePDClusterRequest) Unmarshal(fmt format.Format, data []byte) error {
+func (dpd *DescribePDClusterRequest) Unmarshal(fmt codec.Format, data []byte) error {
 	return unmarshal(dpd, fmt, data)
 }
 
 func (dpd *DescribePDClusterRequest) Timeout() int32 {
 	return dpd.TimeoutMs
+}
+
+// CommitObjectRequest is a request to rpcfb.OperationCodeCOMMIT_OBJECT
+type CommitObjectRequest struct {
+	baseRequest
+	baseUnmarshaler
+	nonLongPollRequest
+
+	rpcfb.CommitObjectRequestT
+}
+
+func (co *CommitObjectRequest) unmarshalFlatBuffer(data []byte) error {
+	co.CommitObjectRequestT = *rpcfb.GetRootAsCommitObjectRequest(data, 0).UnPack()
+	return nil
+}
+
+func (co *CommitObjectRequest) Unmarshal(fmt codec.Format, data []byte) error {
+	return unmarshal(co, fmt, data)
+}
+
+func (co *CommitObjectRequest) Timeout() int32 {
+	return co.TimeoutMs
+}
+
+// ListResourceRequest is a request to rpcfb.OperationCodeLIST_RESOURCE
+type ListResourceRequest struct {
+	baseRequest
+	baseUnmarshaler
+	nonLongPollRequest
+
+	rpcfb.ListResourceRequestT
+}
+
+func (lr *ListResourceRequest) unmarshalFlatBuffer(data []byte) error {
+	lr.ListResourceRequestT = *rpcfb.GetRootAsListResourceRequest(data, 0).UnPack()
+	return nil
+}
+
+func (lr *ListResourceRequest) Unmarshal(fmt codec.Format, data []byte) error {
+	return unmarshal(lr, fmt, data)
+}
+
+func (lr *ListResourceRequest) Timeout() int32 {
+	return lr.TimeoutMs
+}
+
+// WatchResourceRequest is a request to rpcfb.OperationCodeWATCH_RESOURCE
+type WatchResourceRequest struct {
+	baseRequest
+	baseUnmarshaler
+
+	rpcfb.WatchResourceRequestT
+}
+
+func (wr *WatchResourceRequest) unmarshalFlatBuffer(data []byte) error {
+	wr.WatchResourceRequestT = *rpcfb.GetRootAsWatchResourceRequest(data, 0).UnPack()
+	return nil
+}
+
+func (wr *WatchResourceRequest) Unmarshal(fmt codec.Format, data []byte) error {
+	return unmarshal(wr, fmt, data)
+}
+
+func (wr *WatchResourceRequest) Timeout() int32 {
+	return wr.TimeoutMs
+}
+
+func (wr *WatchResourceRequest) LongPoll() bool {
+	return true
 }

@@ -22,6 +22,9 @@ pub(crate) struct AlignedBufWriter {
 
     /// Pre-allocated buffers
     allocated: VecDeque<Arc<AlignedBuf>>,
+
+    /// Flag availability of buffered data to write and flush
+    buffering: bool,
 }
 
 impl AlignedBufWriter {
@@ -32,6 +35,7 @@ impl AlignedBufWriter {
             full: vec![],
             current: None,
             allocated: VecDeque::new(),
+            buffering: false,
         }
     }
 
@@ -186,7 +190,7 @@ impl AlignedBufWriter {
         }
         debug_assert_eq!(pos, data.len());
         self.cursor += data.len() as u64;
-
+        self.buffering = true;
         Ok(())
     }
 
@@ -209,13 +213,30 @@ impl AlignedBufWriter {
     ///
     /// If the backing buffer is full, it will be drained;
     /// If it is partially filled, its `Arc` reference will be cloned.
-    pub(crate) fn take(&mut self) -> Vec<Arc<AlignedBuf>> {
-        let mut items: Vec<_> = self.full.extract_if(|buf| 0 == buf.remaining()).collect();
+    ///
+    /// # Arguments
+    /// * `slots` - Number of io-uring SQE slots available in submission queue
+    pub(crate) fn take(&mut self, slots: usize) -> Vec<Arc<AlignedBuf>> {
+        let mut taken = 0;
+        let mut items: Vec<_> = self
+            .full
+            .extract_if(|_buf| {
+                taken += 1;
+                taken <= slots
+            })
+            .collect();
 
-        if let Some(ref buf) = self.current {
-            if buf.has_data() {
-                items.push(Arc::clone(buf));
+        if taken < slots {
+            if let Some(ref buf) = self.current {
+                if buf.has_data() {
+                    items.push(Arc::clone(buf));
+                }
             }
+            // All buffered data are taken
+            self.buffering = false;
+        } else if self.full.is_empty() {
+            // If all buffered data are in `full` and `full` are all taken
+            self.buffering = self.current.as_ref().map_or(0, |buf| buf.limit()) > 0;
         }
 
         items.iter().for_each(|item| {
@@ -223,6 +244,11 @@ impl AlignedBufWriter {
         });
 
         items
+    }
+
+    /// Indicate if there are still some buffered data available to take and submit to io-uring
+    pub(crate) fn buffering(&self) -> bool {
+        self.buffering
     }
 
     pub(crate) fn remaining(&self) -> usize {
@@ -286,21 +312,21 @@ mod tests {
         assert_eq!(0, buf_writer.max_allocated_wal_offset());
 
         buf_writer.reserve_to(ALIGNMENT as u64, 16384)?;
-        assert_eq!(buf_writer.remaining(), ALIGNMENT as usize);
+        assert_eq!(buf_writer.remaining(), { ALIGNMENT });
         assert_eq!(ALIGNMENT as u64, buf_writer.max_allocated_wal_offset());
         assert_eq!(0, buf_writer.cursor);
 
         buf_writer.reserve_to(ALIGNMENT as u64, 16384)?;
-        assert_eq!(buf_writer.remaining(), ALIGNMENT as usize);
+        assert_eq!(buf_writer.remaining(), { ALIGNMENT });
         assert_eq!(ALIGNMENT as u64, buf_writer.max_allocated_wal_offset());
         assert_eq!(0, buf_writer.cursor);
 
         buf_writer.reserve_to((ALIGNMENT + 1) as u64, 16384)?;
-        assert_eq!(buf_writer.remaining(), (ALIGNMENT * 2) as usize);
+        assert_eq!(buf_writer.remaining(), { ALIGNMENT * 2 });
         assert_eq!(ALIGNMENT as u64 * 2, buf_writer.max_allocated_wal_offset());
 
         buf_writer.reserve_to(ALIGNMENT as u64 * 2 - 1, 16384)?;
-        assert_eq!(buf_writer.remaining(), (ALIGNMENT * 2) as usize);
+        assert_eq!(buf_writer.remaining(), { ALIGNMENT * 2 });
         assert_eq!(ALIGNMENT as u64 * 2, buf_writer.max_allocated_wal_offset());
         Ok(())
     }

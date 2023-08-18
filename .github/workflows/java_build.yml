@@ -24,11 +24,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v3
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.4.0
+        with:
+          prefix-key: ""
+          env-vars: ""
       - name: Install Deps
         run: |
-          ./scripts/install_deps.sh
+          sudo ./scripts/install_deps.sh
       - name: Build Shared Library
-        run: cargo build -p frontend --release -Z unstable-options --out-dir=sdks/frontend-java/client/src/main/resources/META-INF/native/
+        run: |
+          cargo build -p frontend --release
+          cp ./target/release/libfrontend.so ./sdks/frontend-java/client/src/main/resources/META-INF/native/libfrontend_linux_x86_64.so
       - name: Set up JDK ${{ matrix.jdk }}
         uses: actions/setup-java@v3
         with:

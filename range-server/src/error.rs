@@ -1,9 +1,9 @@
-use codec::frame::OperationCode;
+use protocol::rpc::header::OperationCode;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, PartialOrd)]
 pub enum ServiceError {
-    #[error("Unsupported operation `{0}`")]
+    #[error("Unsupported operation `{0:?}`")]
     Unsupported(OperationCode),
 
     #[error("Failed to describe stream")]

@@ -17,34 +17,28 @@ use crate::{
 };
 use bytes::Bytes;
 use codec::frame::Frame;
+use local_sync::mpsc;
 use log::{trace, warn};
 use protocol::rpc::header::{StatusT, SystemErrorT};
-use std::{cell::UnsafeCell, rc::Rc};
-use store::Store;
+use std::rc::Rc;
 
 /// Representation of the incoming request.
 ///
 ///
-pub(crate) struct ServerCall<S, M> {
+pub(crate) struct ServerCall<M> {
     /// The incoming request
     pub(crate) request: Frame,
 
     /// Sender for future response
     ///
     /// Note the receiver part is polled by `ChannelWriter` in a spawned task.
-    pub(crate) sender: tokio::sync::mpsc::UnboundedSender<Frame>,
+    pub(crate) sender: mpsc::unbounded::Tx<Frame>,
 
-    /// `Store` to query, persist and replicate records.
-    ///
-    /// Note this store is `!Send` as it follows thread-per-core pattern.
-    pub(crate) store: Rc<S>,
-
-    pub(crate) range_manager: Rc<UnsafeCell<M>>,
+    pub(crate) range_manager: Rc<M>,
 }
 
-impl<S, M> ServerCall<S, M>
+impl<M> ServerCall<M>
 where
-    S: Store,
     M: RangeManager,
 {
     /// Serve the incoming request
@@ -55,7 +49,10 @@ where
         trace!(
             "Receive a request. stream-id={}, opcode={}",
             self.request.stream_id,
-            self.request.operation_code
+            self.request
+                .operation_code
+                .variant_name()
+                .unwrap_or("INVALID_OPCODE")
         );
         let now = std::time::Instant::now();
         let mut response = Frame::new(self.request.operation_code);
@@ -75,12 +72,8 @@ where
                 );
 
                 // Delegate the request to its dedicated handler.
-                cmd.apply(
-                    Rc::clone(&self.store),
-                    Rc::clone(&self.range_manager),
-                    &mut response,
-                )
-                .await;
+                cmd.apply(Rc::clone(&self.range_manager), &mut response)
+                    .await;
 
                 match cmd {
                     Command::Append(_) => {
@@ -117,12 +110,79 @@ where
                     self.request.stream_id
                 );
             }
-            Err(e) => {
+            Err(_e) => {
                 warn!(
-                    "Failed to send response[stream-id={}] to channel. Cause: {:?}",
-                    self.request.stream_id, e
+                    "Failed to send response[stream-id={}] to channel because rx of mpsc channel has been closed",
+                    self.request.stream_id
                 );
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServerCall;
+    use crate::range_manager::MockRangeManager;
+    use codec::frame::Frame;
+    use local_sync::mpsc;
+    use protocol::rpc::header::{ErrorCode, OperationCode, SystemError};
+    use std::rc::Rc;
+
+    #[test]
+    fn test_call() {
+        let range_manager = MockRangeManager::default();
+        let (tx, mut rx) = mpsc::unbounded::channel();
+
+        let request = Frame::new(OperationCode::PING);
+
+        let mut server_call = ServerCall {
+            request,
+            sender: tx,
+            range_manager: Rc::new(range_manager),
+        };
+
+        tokio_uring::start(async move {
+            server_call.call().await;
+            match rx.recv().await {
+                Some(resp) => {
+                    assert_eq!(resp.operation_code, OperationCode::PING);
+                }
+                None => {
+                    panic!("Should get a response frame");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_call_when_error() {
+        let range_manager = MockRangeManager::default();
+        let (tx, mut rx) = mpsc::unbounded::channel();
+
+        let request = Frame::new(OperationCode::CREATE_RANGE);
+
+        let mut server_call = ServerCall {
+            request,
+            sender: tx,
+            range_manager: Rc::new(range_manager),
+        };
+
+        tokio_uring::start(async move {
+            server_call.call().await;
+            match rx.recv().await {
+                Some(resp) => {
+                    assert_eq!(resp.operation_code, OperationCode::CREATE_RANGE);
+                    assert!(resp.system_error());
+                    if let Some(ref buf) = resp.header {
+                        let sys_error = flatbuffers::root::<SystemError>(buf).unwrap();
+                        assert_eq!(sys_error.status().code(), ErrorCode::BAD_REQUEST);
+                    }
+                }
+                None => {
+                    panic!("Should get a response frame");
+                }
+            }
+        });
     }
 }

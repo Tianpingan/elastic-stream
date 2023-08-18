@@ -8,13 +8,13 @@ use model::Batch;
 #[derive(Clone, Debug)]
 pub struct AppendRecordRequest {
     /// Stream ID
-    pub stream_id: i64,
+    pub stream_id: u64,
 
     /// Range index
     pub range_index: i32,
 
     /// Base offset of the nested record entries in `buffer`
-    pub offset: i64,
+    pub offset: u64,
 
     /// Number of nested record entries included in `buffer`.
     pub len: u32,
@@ -40,7 +40,7 @@ impl Display for AppendRecordRequest {
 
 impl Batch for AppendRecordRequest {
     fn offset(&self) -> u64 {
-        self.offset as u64
+        self.offset
     }
 
     fn len(&self) -> u32 {
@@ -58,17 +58,7 @@ impl PartialEq for AppendRecordRequest {
 
 impl PartialOrd for AppendRecordRequest {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match other.stream_id.partial_cmp(&self.stream_id) {
-            Some(Ordering::Equal) => {}
-            ord => return ord,
-        }
-
-        match other.range_index.partial_cmp(&self.range_index) {
-            Some(Ordering::Equal) => {}
-            ord => return ord,
-        }
-
-        other.offset.partial_cmp(&self.offset)
+        Some(self.cmp(other))
     }
 }
 

@@ -7,6 +7,7 @@ use std::{
 use error::ConfigurationError;
 use model::RangeServer;
 use nix::sys::stat;
+use protocol::rpc::header::RangeServerState;
 use serde::{Deserialize, Serialize};
 pub mod error;
 
@@ -102,6 +103,9 @@ impl Default for Client {
 pub struct Profiling {
     pub enable: bool,
 
+    #[serde(rename = "server-endpoint")]
+    pub server_endpoint: String,
+
     #[serde(rename = "sampling-frequency")]
     pub sampling_frequency: i32,
 
@@ -121,6 +125,7 @@ impl Default for Profiling {
     fn default() -> Self {
         Self {
             enable: true,
+            server_endpoint: "".to_owned(),
             sampling_frequency: 1000,
             report_interval: 300,
             report_path: "flamegraph".to_owned(),
@@ -131,8 +136,11 @@ impl Default for Profiling {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Server {
-    pub host: String,
-    pub port: u16,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub addr: String,
+
+    #[serde(skip_serializing, skip_deserializing)]
+    pub advertise_addr: String,
 
     /// Range Server ID
     #[serde(default)]
@@ -156,7 +164,8 @@ impl Server {
     pub fn range_server(&self) -> RangeServer {
         RangeServer {
             server_id: self.server_id,
-            advertise_address: format!("{}:{}", self.host, self.port),
+            advertise_address: self.advertise_addr.clone(),
+            state: RangeServerState::RANGE_SERVER_STATE_READ_WRITE,
         }
     }
 }
@@ -164,8 +173,8 @@ impl Server {
 impl Default for Server {
     fn default() -> Self {
         Self {
-            host: "127.0.0.1".to_owned(),
-            port: 10911,
+            addr: String::from("127.0.0.1:10911"),
+            advertise_addr: String::from("127.0.0.1:10911"),
             server_id: 0,
             worker_cpu_set: String::from("0"),
             uring: Uring::default(),
@@ -268,9 +277,15 @@ pub struct Store {
     #[serde(rename = "max-cache-size")]
     pub max_cache_size: u64,
 
+    #[serde(rename = "cache-high-watermark")]
+    pub cache_high_watermark: usize,
+
     // Device block size
     #[serde(default)]
     pub alignment: usize,
+
+    #[serde(rename = "io-size")]
+    pub io_size: usize,
 
     // Total number of blocks of the device that backs store-base.
     #[serde(default)]
@@ -303,7 +318,9 @@ impl Default for Store {
             path: Path::default(),
             segment_size: 1048576,
             max_cache_size: 1048576,
+            cache_high_watermark: 80,
             alignment: 4096,
+            io_size: 1024 * 256,
             blocks: 0,
             read_block_size: 131072,
             pre_allocate_segment_file_number: 2,
@@ -327,7 +344,7 @@ pub struct Uring {
     /// Enable polling for SQ completions and I/O completion events.
     /// If this option is disabled, interrupt mode is used.
     /// Note that the network uring doesn't support polling mode, so this option will be ignored for network uring.
-    #[serde(rename = "enable-polling", default)]
+    #[serde(rename = "polling", default)]
     pub polling: bool,
 
     /// In interrupt mode, or when queue_depth is full, the uring driver will enter to syscall and wait for I/O completion events.
@@ -391,6 +408,7 @@ impl Default for RocksDB {
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Observation {
     pub metrics: Metrics,
+    pub trace: Trace,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Metrics {
@@ -405,6 +423,23 @@ impl Default for Metrics {
         }
     }
 }
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Trace {
+    pub endpoint: String,
+    pub protocol: String,
+    #[serde(rename = "timeout-ms")]
+    pub timeout_ms: u64,
+}
+impl Default for Trace {
+    fn default() -> Self {
+        Self {
+            endpoint: "http:localhost:4317".to_owned(),
+            protocol: "grpc".to_owned(),
+            timeout_ms: 1000,
+        }
+    }
+}
+
 /// Configurable items of the replication layer.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Replication {
@@ -425,11 +460,50 @@ impl Default for Replication {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ObjectStorageConfig {
+    #[serde(default = "default_cluster")]
+    pub cluster: String,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    #[serde(rename = "object-size")]
+    pub object_size: u32,
+    #[serde(rename = "part-size")]
+    pub part_size: u32,
+    #[serde(rename = "max-cache-size")]
+    pub max_cache_size: u64,
+    #[serde(rename = "cache-low-watermark")]
+    pub cache_low_watermark: u64,
+    #[serde(rename = "force-flush-secs")]
+    pub force_flush_secs: u64,
+}
+
+fn default_cluster() -> String {
+    "elasticstream".to_owned()
+}
+
+impl Default for ObjectStorageConfig {
+    fn default() -> Self {
+        Self {
+            cluster: "elasticstream".to_owned(),
+            endpoint: "".to_owned(),
+            bucket: "".to_owned(),
+            region: "".to_owned(),
+            object_size: 128 * 1024 * 1024,
+            part_size: 16 * 1024 * 1024,
+            max_cache_size: 1024 * 1024 * 1024,
+            cache_low_watermark: 7 * 128 * 1024 * 1024,
+            force_flush_secs: 60 * 20,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Configuration {
     /// Unit of time in milliseconds.
     pub tick: u64,
 
-    #[serde(rename = "placement-driver")]
+    #[serde(skip_serializing, skip_deserializing)]
     pub placement_driver: String,
 
     pub client: Client,
@@ -441,6 +515,9 @@ pub struct Configuration {
     pub replication: Replication,
 
     pub observation: Observation,
+
+    #[serde(rename = "object-storage", default = "ObjectStorageConfig::default")]
+    pub object_storage: ObjectStorageConfig,
 }
 
 impl Default for Configuration {
@@ -453,6 +530,7 @@ impl Default for Configuration {
             store: Default::default(),
             replication: Default::default(),
             observation: Default::default(),
+            object_storage: Default::default(),
         }
     }
 }
@@ -570,10 +648,9 @@ mod tests {
         let mut content = String::new();
         file.read_to_string(&mut content)?;
         let config: Configuration = serde_yaml::from_str(&content)?;
-        assert_eq!(10911, config.server.port);
         assert_eq!("1", config.server.worker_cpu_set);
-        assert_eq!(128, config.server.uring.queue_depth);
-        assert_eq!(32768, config.store.rocksdb.flush_threshold);
+        assert_eq!(32768, config.server.uring.queue_depth);
+        assert_eq!(655360, config.store.rocksdb.flush_threshold);
 
         assert_eq!(2, config.replication.connection_pool_size);
         Ok(())

@@ -13,6 +13,8 @@ import (
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+
+	"github.com/AutoMQ/pd/pkg/util/netutil"
 )
 
 var (
@@ -27,6 +29,7 @@ var (
 		cluster := NewCluster()
 		cluster.SealReqTimeoutMs = 1000
 		cluster.RangeServerTimeout = 100 * time.Second
+		cluster.StreamDeleteDelay = 24 * time.Hour
 		return cluster
 	}
 	_testDefaultSbp = func() *Sbp {
@@ -57,7 +60,7 @@ var (
 			AdvertiseClientUrls:         "http://127.0.0.1:12379",
 			Name:                        "pd-hostname",
 			DataDir:                     "default.pd-hostname",
-			InitialCluster:              "pd=http://127.0.0.1:12380",
+			InitialCluster:              "pd-hostname=http://127.0.0.1:12380",
 			PDAddr:                      "127.0.0.1:12378",
 			AdvertisePDAddr:             "127.0.0.1:12378",
 			LeaderLease:                 3,
@@ -69,6 +72,7 @@ var (
 		cluster := NewCluster()
 		cluster.SealReqTimeoutMs = 1234567
 		cluster.RangeServerTimeout = 1*time.Hour + 1*time.Minute + 1*time.Second
+		cluster.StreamDeleteDelay = 2*time.Hour + 2*time.Minute + 2*time.Second
 		return cluster
 	}
 	_testSbp = func() *Sbp {
@@ -160,7 +164,7 @@ func TestNewConfig(t *testing.T) {
 				Name:                        "",
 				DataDir:                     "",
 				InitialCluster:              "",
-				PDAddr:                      "127.0.0.1:12378",
+				PDAddr:                      "0.0.0.0:12378",
 				AdvertisePDAddr:             "",
 				LeaderLease:                 3,
 				LeaderPriorityCheckInterval: time.Minute,
@@ -212,6 +216,7 @@ func TestNewConfig(t *testing.T) {
 				"--log-rotate-compress=true",
 				"--cluster-seal-req-timeout-ms=1234567",
 				"--cluster-range-server-timeout=1h1m1s",
+				"--cluster-stream-delete-delay=2h2m2s",
 				"--sbp-server-heartbeat-interval=2h2m2s",
 				"--sbp-server-heartbeat-miss-count=12345678",
 				"--sbp-client-idle-conn-timeout=3h3m3s",
@@ -378,6 +383,8 @@ func TestConfigFromEnv(t *testing.T) {
 func TestConfig_Adjust(t *testing.T) {
 	hostname, e := os.Hostname()
 	require.NoError(t, e)
+	ip, e := netutil.GetNonLoopbackIP()
+	require.NoError(t, e)
 
 	tests := []struct {
 		name    string
@@ -395,10 +402,10 @@ func TestConfig_Adjust(t *testing.T) {
 					config.Name = fmt.Sprintf("pd-%s", hostname)
 					config.Dir = fmt.Sprintf("default.pd-%s", hostname)
 					config.InitialCluster = fmt.Sprintf("pd-%s=http://127.0.0.1:12380", hostname)
-					config.LPUrls, _ = parseUrls("http://127.0.0.1:12380")
-					config.LCUrls, _ = parseUrls("http://127.0.0.1:12379")
-					config.APUrls, _ = parseUrls("http://127.0.0.1:12380")
-					config.ACUrls, _ = parseUrls("http://127.0.0.1:12379")
+					config.ListenPeerUrls, _ = parseUrls("http://127.0.0.1:12380")
+					config.ListenClientUrls, _ = parseUrls("http://127.0.0.1:12379")
+					config.AdvertisePeerUrls, _ = parseUrls("http://127.0.0.1:12380")
+					config.AdvertiseClientUrls, _ = parseUrls("http://127.0.0.1:12379")
 					config.InitialClusterToken = "pd-cluster"
 					config.LogLevel = "warn"
 					config.AutoCompactionMode = "periodic"
@@ -415,8 +422,8 @@ func TestConfig_Adjust(t *testing.T) {
 				Name:                        fmt.Sprintf("pd-%s", hostname),
 				DataDir:                     fmt.Sprintf("default.pd-%s", hostname),
 				InitialCluster:              fmt.Sprintf("pd-%s=http://127.0.0.1:12380", hostname),
-				PDAddr:                      "127.0.0.1:12378",
-				AdvertisePDAddr:             "127.0.0.1:12378",
+				PDAddr:                      "0.0.0.0:12378",
+				AdvertisePDAddr:             fmt.Sprintf("%s:12378", ip),
 				LeaderLease:                 3,
 				LeaderPriorityCheckInterval: time.Minute,
 			},
@@ -437,10 +444,10 @@ func TestConfig_Adjust(t *testing.T) {
 					config.Name = "test-name"
 					config.Dir = "default.test-name"
 					config.InitialCluster = "test-name=http://example.com:12380,test-name=http://10.0.0.1:12380"
-					config.LPUrls, _ = parseUrls("http://example.com:12380,http://10.0.0.1:12380")
-					config.LCUrls, _ = parseUrls("http://example.com:12379,http://10.0.0.1:12379")
-					config.APUrls, _ = parseUrls("http://example.com:12380,http://10.0.0.1:12380")
-					config.ACUrls, _ = parseUrls("http://example.com:12379,http://10.0.0.1:12379")
+					config.ListenPeerUrls, _ = parseUrls("http://example.com:12380,http://10.0.0.1:12380")
+					config.ListenClientUrls, _ = parseUrls("http://example.com:12379,http://10.0.0.1:12379")
+					config.AdvertisePeerUrls, _ = parseUrls("http://example.com:12380,http://10.0.0.1:12380")
+					config.AdvertiseClientUrls, _ = parseUrls("http://example.com:12379,http://10.0.0.1:12379")
 					config.InitialClusterToken = "pd-cluster"
 					config.LogLevel = "warn"
 					config.AutoCompactionMode = "periodic"
@@ -458,7 +465,7 @@ func TestConfig_Adjust(t *testing.T) {
 				DataDir:                     "default.test-name",
 				InitialCluster:              "test-name=http://example.com:12380,test-name=http://10.0.0.1:12380",
 				PDAddr:                      "example.com:12378",
-				AdvertisePDAddr:             "example.com:12378",
+				AdvertisePDAddr:             fmt.Sprintf("%s:12378", ip),
 				LeaderLease:                 3,
 				LeaderPriorityCheckInterval: time.Minute,
 			},

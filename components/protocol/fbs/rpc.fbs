@@ -12,6 +12,8 @@ enum ErrorCode : int16 {
     // Error when decoding buffers into protocol structs
     DECODE = 2,
 
+    UNEXPECTED = 3,
+
     // 12xx means success or partial success.
     OK = 1200,
     // Requested offset = next_offset. Note that this code only applies to open ranges.
@@ -29,6 +31,7 @@ enum ErrorCode : int16 {
     TOO_MANY_REQUESTS = 1429,
     HEADER_FIELDS_TOO_LARGE = 1431,
     UNAVAILABLE_FOR_LEGAL_REASONS = 1451,
+
     // Invalid request for a sealed range, such as appending.
     RANGE_ALREADY_SEALED = 1460,
     // For an open range, the requested offset > next_offset.
@@ -37,12 +40,41 @@ enum ErrorCode : int16 {
     RANGE_NOT_FOUND = 1462,
     // For a sealed range, the requested offset is out of range bounds. For an open range, the requested offset < start_offset.
     OFFSET_OUT_OF_RANGE_BOUNDS = 1463,
+    // The offset associated with the append request is already committed.
+    APPEND_TO_COMMITTED_OFFSET = 1464,
+    // The append request is already on the fly, which means there is a pending append request with the same offset.
+    APPEND_TO_PENDING_OFFSET = 1465,
+    // The append request is out of order, which means the associated offset is beyond the next append offset.
+    APPEND_TO_OVERTAKEN_OFFSET = 1466,
     // Try to create a new range when the last range in the stream is not sealed.
     CREATE_RANGE_BEFORE_SEAL = 1470,
-    // Try to seal a range with an epoch which is smaller than the current range's epoch.
-    // or
-    // Try to create a new range with an epoch that is smaller than the previous range's epoch.
-    EXPIRED_RANGE_EPOCH = 1471,
+    // Cannot find the object for the request.
+    OBJECT_NOT_FOUND = 1472,
+    // Cannot find match records in objects.
+    NO_MATCH_RECORDS_IN_OBJECT = 1473,
+    // Object operator is uninitialized.
+    OBJECT_OPERATOR_UNINITIALIZED = 1474,
+    // The object data is illegal, parse error.
+    OBJECT_PARSE_ERROR = 1475,
+    // Request object store error.
+    REQUEST_OBJECT_STORE_ERROR = 1476,
+    RECORDS_BLOCKS_NOT_CONTINUOUS = 1477,
+
+    STREAM_ALREADY_CLOSED = 1478,
+    REPLICA_NOT_ENOUGH = 1479,
+    RECORDS_PARSE_ERROR = 1480,
+    ALL_REPLICAS_FETCH_FAILED = 1481,
+
+
+    RPC_TIMEOUT = 1482,
+    BAD_ADDRESS = 1483,
+    CONNECT_REFUSED = 1484,
+    CONNECT_FAIL = 1485,
+    CONNECT_TIMEOUT = 1486,
+    CONNECT_DISABLE_NAGLE_FAIL = 1487,
+    STREAM_NOT_EXIST = 1488,
+    // Try to seal or create a range with an epoch which not equals to the stream's epoch.
+    EXPIRED_STREAM_EPOCH = 1489,
 
     // Server understands the intended operation but it does not support that.
     UNSUPPORTED_OPERATION = 1498,
@@ -67,9 +99,122 @@ enum ErrorCode : int16 {
     // leader nodes. Otherwise, use this code to signal the client to redirect future requests.
     PD_NOT_LEADER = 1503,
 
+    // When listing or watching resources, the resource version is too old and the PD server has compacted it.
+    PD_COMPACTED = 1504,
+
     // 25xx is reserved for range server errors
     RS_INTERNAL_SERVER_ERROR = 2500,
     RS_NOT_IMPLEMENTED = 2501,
+    RS_DATA_CORRUPTED = 2502,
+
+    // Failed to create range on range server using the given metadata.
+    RS_CREATE_RANGE = 2503,
+
+    // Failed to seal range on range server
+    RS_SEAL_RANGE = 2504,
+}
+
+// Flag variants shared by multiple opcodes
+enum CommonFlags : byte {
+    // Mark type of the frame is request.
+    REQUEST = 0,
+
+    // Mark frame is a response to a prior request.
+    RESPONSE = 1,
+
+    // Mark end-of-stream
+    END_OF_STREAM = 2,
+
+    // Mark the frame is carrying a system error. For example, if decoding header fails, server would
+    // flag system error in response.
+    SYSTEM_ERROR = 4,
+}
+
+
+// Flag variants for GOAWAY frame
+enum GoAwayFlags : byte {
+    // The underlynig connection/stream has been idle for the configured period of time. An endpoint, who
+    // detects this idleness, is going to close the idle connection/stream.
+    CONNECTION_IDLE = 0,
+
+    // Server is going to perform maintenance shortly. No new connection/stream will be served for current
+    // epoch. Servers will broadcast GOAWAY frames to existing streams/connections, instructing clients to
+    // conduct fail-over as soon as possible.
+    SERVER_MAINTENANCE = 1,
+}
+
+enum OperationCode : short {
+    // 0x0000 is reserved for unknown
+    UNKNOWN = 0x0000,
+
+    // 0x0000 ~ 0x0FFF is reserved for system
+
+    // Measure a minimal round-trip time from the sender.
+    PING = 0x0001,
+    // Initiate a shutdown of a connection or signal serious error conditions.
+    GOAWAY = 0x0002,
+    // To keep clients alive through periodic heartbeat frames.
+    HEARTBEAT = 0x0003,
+
+    // Allocate a unique ID from placement drivers.
+    ALLOCATE_ID = 0x0004,
+
+    // 0x1000 ~ 0x1FFF is reserved for data communication
+
+    // Append records to the range server.
+    APPEND = 0x1001,
+    // Fetch records from the range server.
+    FETCH = 0x1002,
+
+    // 0x2000 ~ 0x2FFF is reserved for range management
+
+    // List ranges from the PD of a batch of streams.
+    LIST_RANGE = 0x2001,
+    // Request seal ranges of a batch of streams.
+    // The PD will provide the `SEAL_AND_NEW` semantic while Range Server only provide the `SEAL` semantic.
+    SEAL_RANGE = 0x2002,
+    // Syncs newly writable ranges to a range server to accelerate the availability of a newly created writable range.
+    SYNC_RANGE = 0x2003,
+
+    // Create a new range for a stream.
+    CREATE_RANGE = 0x2004,
+
+    // 0x3000 ~ 0x3FFF is reserved for stream management
+
+    // Create a batch of streams.
+    CREATE_STREAM = 0x3001,
+    // Delete a batch of streams.
+    DELETE_STREAM = 0x3002,
+    // Update a batch of streams.
+    UPDATE_STREAM = 0x3003,
+    // Describe the details of a batch of streams.
+    DESCRIBE_STREAM = 0x3004,
+    // Trim the min offset of a batch of streams.
+    TRIM_STREAM = 0x3005,
+
+    // 0x4000 ~ 0x4FFF is reserved for observability
+
+    // Range Server reports metrics to the PD.
+    REPORT_METRICS = 0x4001,
+
+    // Describe placement driver cluster membership.
+    DESCRIBE_PLACEMENT_DRIVER = 0x4002,
+
+    // Range Server reports replica progress to the PD
+    REPORT_REPLICA_PROGRESS = 0x4003,
+
+    // 0x5000 ~ 0x5FFF is reserved for object management
+
+    // Commit an object after all its data has been written to the object storage.
+    COMMIT_OBJECT = 0x5001,
+
+    // 0x6000 ~ 0x6FFF is reserved for resource management
+
+    // List resources from the PD.
+    LIST_RESOURCE = 0x6001,
+
+    // Watch resources with the given revision from the PD.
+    WATCH_RESOURCE = 0x6002,
 }
 
 // The Status type defines a logical error model.
@@ -228,9 +373,11 @@ table ObjectMetadata {
 
     start_offset: int64 = -1 (id: 1);
 
-    end_offset: int64 = -1 (id: 2);
+    end_offset_delta: int32 = -1 (id: 2);
 
-    sparse_index: [ubyte] (id: 3);
+    data_len: int32 = -1 (id: 3);
+
+    sparse_index: [ubyte] (id: 4);
 }
 
 // Used to fetch the ranges from a specific range server or a specific stream list.
@@ -244,6 +391,14 @@ table ListRangeCriteria {
     stream_id: int64 = -1 (id: 1);
 }
 
+// State of the range server
+enum RangeServerState : byte {
+    RANGE_SERVER_STATE_UNSPECIFIED = 0,
+    RANGE_SERVER_STATE_READ_ONLY = 1,
+    RANGE_SERVER_STATE_READ_WRITE = 2,
+    RANGE_SERVER_STATE_OFFLINE = 3,
+}
+
 table RangeServer {
     // The server id of the range server.
     server_id: int32 = -1 (id: 0);
@@ -251,6 +406,9 @@ table RangeServer {
     // The advertise address of the range server, for client traffic from outside.
     // The schema of the address is `host:port`, while host supports both domain name and IPv4/IPv6 address.
     advertise_addr: string (id: 1, required);
+
+    // State of the range server: `ReadOnly` or `ReadWrite`.
+    state: RangeServerState(id: 2);
 }
 
 // The list streams request is used to list the ranges of a batch of streams.
@@ -270,6 +428,14 @@ table ListRangeResponse {
 
     // The list of ranges.
     ranges: [Range] (id: 2, required);
+}
+
+table OffloadOwner {
+    // The server id of the owner.
+    server_id: int32 = -1 (id: 0);
+
+    // The epoch of the owner.
+    epoch: int16 = -1 (id: 1);
 }
 
 table Range {
@@ -302,6 +468,9 @@ table Range {
 
     // The range replica ack count, only success ack > ack, then the write is success.
     ack_count: int8 = -1 (id: 7);
+
+    // The owner of the range which offloads the data to the object storage.
+    offload_owner: OffloadOwner (id: 8);
 }
 
 table CreateRangeRequest {
@@ -362,13 +531,23 @@ table Stream {
     stream_id: int64 = -1 (id: 0);
 
     // The number of replica of the stream.
-    replica: int8 (id: 1);
+    replica: int8 = -1 (id: 1);
 
     // The number of ack of the stream.
-    ack_count: int8 (id: 2);
+    ack_count: int8 = -1 (id: 2);
 
     // The time to live of records in the stream in milliseconds.
-    retention_period_ms: int64 (id: 3);
+    // Zero means the records will never be deleted automatically.
+    retention_period_ms: int64 = -1 (id: 3);
+
+    // The start offset of the stream, data before this offset has been deleted.
+    start_offset: int64 = -1 (id: 4);
+
+    // The current epoch of the stream.
+    epoch: int64 = -1 (id: 5);
+
+    // The flag to indicate if the stream is deleted.
+    deleted: bool = false (id: 6);
 }
 
 // The create stream request is used to create a batch of streams.
@@ -401,6 +580,9 @@ table DeleteStreamRequest {
 
     // The id of the stream to delete.
     stream_id: int64 = -1 (id: 1);
+
+    // The epoch of the stream.
+    epoch: int64 = -1 (id: 2);
 }
 
 table DeleteStreamResponse {
@@ -418,7 +600,7 @@ table UpdateStreamRequest {
     timeout_ms: int32 (id: 0);
 
     // The streams to update.
-    stream: Stream (id: 1);
+    stream: Stream (id: 1, required);
 }
 
 table UpdateStreamResponse {
@@ -428,7 +610,7 @@ table UpdateStreamResponse {
     throttle_time_ms: int32 (id: 1);
 
     // The updated stream
-    stream: Stream (id: 2);
+    stream: Stream (id: 2, required);
 }
 
 table DescribeStreamRequest {
@@ -449,7 +631,7 @@ table DescribeStreamResponse {
     stream: Stream (id: 2);
 }
 
-// The trim streams request is used to trim a batch of streams to PD.
+// The trim stream request is used to trim a stream to PD.
 // The range server stores the records in the stream in a log structure,
 // and the records are appended to the end of the log.
 // Consider the length of disk is limited, the range server will delete the records to recycling the disk space.
@@ -465,12 +647,16 @@ table TrimStreamRequest {
     // The id of the stream
     stream_id: int64 = -1 (id: 1);
 
+    // The epoch of the stream
+    // If the epoch is not equal to the current epoch of the stream, the trim request will be rejected.
+    epoch: int64 = -1 (id: 2);
+
     // The current minimum offset of the stream.
     // All the records before this offset have be deleted.
-    min_offset: int64 (id: 2);
+    min_offset: int64 (id: 3);
 }
 
-table TrimStreamsResponse {
+table TrimStreamResponse {
     status: Status (id: 0, required);
 
     // The time in milliseconds to throttle the client, due to a quota violation or the server is too busy.
@@ -528,6 +714,135 @@ table DescribePlacementDriverClusterResponse {
     status: Status (id: 0, required);
 
     cluster: PlacementDriverCluster (id: 1, required);
+}
+
+table Obj {
+    // The id of the stream.
+    stream_id: int64 = -1 (id: 0);
+
+    // The index of the range in the stream.
+    range_index: int32 = -1 (id: 1);
+
+    // The epoch of the range server that offloads the object.
+    epoch: int16 = -1 (id: 2);
+
+    // The start offset of the object in the range.
+    start_offset: int64 = -1 (id: 3);
+
+    // The difference between the start offset and the end offset.
+    end_offset_delta: int32 = -1 (id: 4);
+
+    // The length of the object in bytes.
+    data_len: int32 = -1 (id: 5);
+
+    // The sparse index of the object.
+    sparse_index: [ubyte] (id: 6);
+}
+
+table CommitObjectRequest {
+    // The timeout in milliseconds to wait for the response.
+    timeout_ms: int32 (id: 0);
+
+    // The object to commit.
+    object: Obj (id: 1);
+}
+
+table CommitObjectResponse {
+    status: Status (id: 0, required);
+
+    // The time in milliseconds to throttle the client, due to a quota violation or the server is too busy.
+    throttle_time_ms: int32 (id: 1);
+}
+
+enum ResourceType: byte {
+    RESOURCE_UNKNOWN = 0,
+    RESOURCE_RANGE_SERVER = 1,
+    RESOURCE_STREAM = 2,
+    RESOURCE_RANGE = 3,
+    RESOURCE_OBJECT = 4,
+}
+
+// As vectors of unions are not yet supported in rust, we use a struct to wrap the union like
+// `union Resource { RangeServer, Stream, Range, Obj }`.
+table Resource {
+    type: ResourceType (id: 0);
+
+    range_server: RangeServer (id: 1);
+    stream: Stream (id: 2);
+    range: Range (id: 3);
+    object: Obj (id: 4);
+}
+
+enum EventType: byte {
+    EVENT_UNKNOWN = 0,
+    EVENT_ADDED = 1,
+    EVENT_MODIFIED = 2,
+    EVENT_DELETED = 3,
+}
+
+table ResourceEvent {
+    type: EventType (id: 0);
+    resource: Resource (id: 1, required);
+}
+
+table ListResourceRequest {
+    // The timeout in milliseconds to wait for the response.
+    timeout_ms: int32 (id: 0);
+
+    // The type of the resource.
+    resource_type: [ResourceType] (id: 1, required);
+
+    // The maximum number of resources to return.
+    // If not set, the server will return all the resources.
+    // If more resources are available, the server will return a continue token.
+    // NOTE: The server may return fewer than the requested number of resources due to resource limits, and clients
+    // should ONLY use the presence of the continue field to determine whether more results are available.
+    limit: int32 (id: 2);
+
+    // The token to continue listing resources from a previous request.
+    // Since this value is determined by the server, clients may only use the continue token from a previous request.
+    continuation: [ubyte] (id: 3);
+}
+
+table ListResourceResponse {
+    status: Status (id: 0, required);
+
+    // The time in milliseconds to throttle the client, due to a quota violation or the server is too busy.
+    throttle_time_ms: int32 (id: 1);
+
+    // The list of the resources.
+    resources: [Resource] (id: 2, required);
+
+    // The resource version when the request is processed.
+    resource_version: int64 (id: 3);
+
+    // The token to continue listing resources from a previous request.
+    // It may be set if clients set a limit and the server has more resources available.
+    continuation: [ubyte] (id: 4);
+}
+
+table WatchResourceRequest {
+    // The timeout in milliseconds to wait for the response.
+    timeout_ms: int32 (id: 0);
+
+    // The type of the resource.
+    resource_type: [ResourceType] (id: 1, required);
+
+    // The resource version to watch. All changes with a version greater than the given version will be returned.
+    resource_version: int64 (id: 2);
+}
+
+table WatchResourceResponse {
+    status: Status (id: 0, required);
+
+    // The time in milliseconds to throttle the client, due to a quota violation or the server is too busy.
+    throttle_time_ms: int32 (id: 1);
+
+    // The list of the events.
+    events: [ResourceEvent] (id: 2, required);
+
+    // The resource version when the request is processed.
+    resource_version: int64 (id: 3);
 }
 
 table KeyValue {
@@ -681,4 +996,27 @@ table TxnResponse {
     // responses is a list of responses corresponding to the results from applying
     // success if succeeded is true or failure if succeeded is false.
     responses: [ResponseOp] (id: 2);
+}
+
+table ReportRangeProgressRequest {
+    // The timeout in milliseconds to wait for the response.
+    timeout_ms: int32 (id: 0);
+
+    range_server: RangeServer (id: 1, required);
+
+    range_progress: [RangeProgress] (id: 2, required);
+}
+
+table RangeProgress {
+    stream_id: int64 (id: 0);
+
+    range_index: int32 (id: 1);
+
+    confirm_offset: int64 (id: 2);
+}
+
+table ReportRangeProgressResponse {
+    status: Status (id: 0, required);
+
+    throttle_time_ms: int32 (id: 1);
 }

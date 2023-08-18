@@ -1,6 +1,9 @@
 [package]
 name = "frontend"
-version = "0.1.0"
+version = { workspace = true }
+authors = { workspace = true }
+description = { workspace = true }
+license = { workspace = true }
 edition = "2021"
 
 [dependencies]
@@ -18,7 +21,7 @@ lazy_static = { workspace = true }
 local-sync = { workspace = true }
 log = { workspace = true }
 log4rs = { workspace = true }
-minitrace = { workspace = true }
+minitrace = "0.4.1"
 minitrace-jaeger = "0.4.1"
 minstant = { workspace = true }
 model = { path = "../../components/model" }
@@ -33,6 +36,7 @@ util = { path = "../../components/util" }
 [dev-dependencies]
 criterion = { version = "0.4", features = ["html_reports"] }
 env_logger = { workspace = true }
+ulog = { path = "../../components/ulog", features = ["env"] }
 
 [lib]
 crate-type = ["cdylib", "lib"]

@@ -1,17 +1,22 @@
 use crate::request;
 use bytes::Bytes;
 use codec::frame::Frame;
-use codec::frame::OperationCode;
 use log::debug;
 use log::error;
 use log::info;
 use log::trace;
 use log::warn;
+use model::error::EsError;
+use model::object::ObjectMetadata;
+use model::resource::Resource;
+use model::resource::ResourceEvent;
 use model::stream::StreamMetadata;
 use model::AppendResultEntry;
 use protocol::rpc::header::AppendResponse;
+use protocol::rpc::header::CommitObjectResponse;
 use protocol::rpc::header::CreateRangeResponse;
 use protocol::rpc::header::CreateStreamResponse;
+use protocol::rpc::header::DeleteStreamResponse;
 use protocol::rpc::header::DescribePlacementDriverClusterResponse;
 use protocol::rpc::header::DescribeStreamResponse;
 use protocol::rpc::header::ErrorCode;
@@ -19,13 +24,19 @@ use protocol::rpc::header::FetchResponse;
 use protocol::rpc::header::HeartbeatResponse;
 use protocol::rpc::header::IdAllocationResponse;
 use protocol::rpc::header::ListRangeResponse;
+use protocol::rpc::header::ListResourceResponse;
+use protocol::rpc::header::OperationCode;
 use protocol::rpc::header::ReportMetricsResponse;
+use protocol::rpc::header::ReportRangeProgressResponse;
 use protocol::rpc::header::SealRangeResponse;
 use protocol::rpc::header::SystemError;
 
 use model::range::RangeMetadata;
 use model::PlacementDriverNode;
 use model::Status;
+use protocol::rpc::header::TrimStreamResponse;
+use protocol::rpc::header::UpdateStreamResponse;
+use protocol::rpc::header::WatchResourceResponse;
 
 use crate::invocation_context::InvocationContext;
 
@@ -40,7 +51,13 @@ pub struct Response {
     /// Optional response extension, containing additional operation-code-specific data.
     pub headers: Option<Headers>,
 
-    pub payload: Option<Vec<Bytes>>,
+    pub payload: Option<Bytes>,
+}
+
+impl From<&Response> for EsError {
+    fn from(r: &Response) -> Self {
+        EsError::new(r.status.code, &r.status.message)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -75,10 +92,26 @@ pub enum Headers {
 
     Fetch {
         throttle: Option<std::time::Duration>,
+        object_metadata_list: Option<Vec<ObjectMetadata>>,
     },
 
     CreateRange {
         range: RangeMetadata,
+    },
+
+    ListResource {
+        resources: Vec<Resource>,
+        version: i64,
+        continuation: Option<Bytes>,
+    },
+
+    WatchResource {
+        events: Vec<ResourceEvent>,
+        version: i64,
+    },
+
+    UpdateStream {
+        metadata: StreamMetadata,
     },
 }
 
@@ -135,19 +168,24 @@ impl Response {
 
     pub fn on_list_ranges(&mut self, frame: &Frame) {
         if let Some(ref buf) = frame.header {
-            if let Ok(response) = flatbuffers::root::<ListRangeResponse>(buf) {
-                self.status = Into::<Status>::into(&response.status().unpack());
-                if self.status.code != ErrorCode::OK {
-                    return;
+            match flatbuffers::root::<ListRangeResponse>(buf) {
+                Ok(response) => {
+                    self.status = Into::<Status>::into(&response.status().unpack());
+                    if self.status.code != ErrorCode::OK {
+                        return;
+                    }
+                    let range = response
+                        .ranges()
+                        .iter()
+                        .map(|item| Into::<RangeMetadata>::into(&item.unpack()))
+                        .collect::<Vec<_>>();
+                    self.headers = Some(Headers::ListRange {
+                        ranges: Some(range),
+                    });
                 }
-                let range = response
-                    .ranges()
-                    .iter()
-                    .map(|item| Into::<RangeMetadata>::into(&item.unpack()))
-                    .collect::<Vec<_>>();
-                self.headers = Some(Headers::ListRange {
-                    ranges: Some(range),
-                });
+                Err(e) => {
+                    error!("Failed to decode `ListRangeResponse` using FlatBuffers. Cause: {e}");
+                }
             }
         }
     }
@@ -217,8 +255,17 @@ impl Response {
                             response.throttle_time_ms as u64,
                         ))
                     };
-                    self.headers = Some(Headers::Fetch { throttle });
-                    self.payload = frame.payload.clone();
+                    let object_metadata_list = response.object_metadata_list.map(|items| {
+                        items
+                            .iter()
+                            .map(Into::<ObjectMetadata>::into)
+                            .collect::<Vec<_>>()
+                    });
+                    self.headers = Some(Headers::Fetch {
+                        throttle,
+                        object_metadata_list,
+                    });
+                    self.payload = frame.get_response_payload();
                 }
                 Err(e) => {
                     error!(
@@ -341,7 +388,7 @@ impl Response {
                         return;
                     }
                     if let Some(stream) = response.stream() {
-                        let metadata = Into::<StreamMetadata>::into(stream.unpack());
+                        let metadata = Into::<StreamMetadata>::into(&stream.unpack());
                         info!("Created {:?} on {}", metadata, ctx.target());
                         self.headers = Some(Headers::CreateStream { stream: metadata });
                     } else {
@@ -371,7 +418,7 @@ impl Response {
                         return;
                     }
                     if let Some(stream) = response.stream() {
-                        let metadata = Into::<StreamMetadata>::into(stream.unpack());
+                        let metadata = Into::<StreamMetadata>::into(&stream.unpack());
                         debug!("Describe stream={:?} on {}", metadata, ctx.target());
                         self.headers = Some(Headers::DescribeStream { stream: metadata });
                     } else {
@@ -387,6 +434,141 @@ impl Response {
                         "Failed to decode DescribeStreamResponse using FlatBuffers. Cause: {}",
                         e
                     );
+                }
+            }
+        }
+    }
+
+    pub fn on_report_replica_progress(&mut self, frame: &Frame) {
+        if let Some(ref buf) = frame.header {
+            match flatbuffers::root::<ReportRangeProgressResponse>(buf) {
+                Ok(response) => {
+                    trace!("Received Report replica progress response: {:?}", response);
+                    self.status = Into::<Status>::into(&response.status().unpack());
+                }
+
+                Err(e) => {
+                    error!(
+                        "Failed to parse Report replica progress response header: {:?}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn on_commit_object(&mut self, frame: &Frame) {
+        if let Some(buf) = frame.header.as_ref() {
+            match flatbuffers::root::<CommitObjectResponse>(buf) {
+                Ok(response) => {
+                    trace!("Received Commit object response: {:?}", response);
+                    self.status = Into::<Status>::into(&response.status().unpack());
+                }
+
+                Err(e) => {
+                    error!("Failed to parse Commit object response header: {:?}", e);
+                }
+            }
+        }
+    }
+
+    pub fn on_list_resource(&mut self, frame: &Frame) {
+        if let Some(buf) = frame.header.as_ref() {
+            match flatbuffers::root::<ListResourceResponse>(buf) {
+                Ok(response) => {
+                    trace!("Received List resource response: {:?}", response);
+                    self.status = Into::<Status>::into(&response.status().unpack());
+                    if self.status.code == ErrorCode::OK {
+                        self.headers = Some(Headers::ListResource {
+                            resources: response
+                                .resources()
+                                .iter()
+                                .map(|r| r.unpack())
+                                .map(|rt| Resource::from(&rt))
+                                .collect(),
+                            version: response.resource_version(),
+                            continuation: response
+                                .continuation()
+                                .map(|c| c.bytes())
+                                .map(Bytes::copy_from_slice),
+                        })
+                    }
+                }
+
+                Err(e) => {
+                    error!("Failed to parse List resource response header: {:?}", e);
+                }
+            }
+        }
+    }
+
+    pub fn on_watch_resource(&mut self, frame: &Frame) {
+        if let Some(buf) = frame.header.as_ref() {
+            match flatbuffers::root::<WatchResourceResponse>(buf) {
+                Ok(response) => {
+                    trace!("Received Watch resource response: {:?}", response);
+                    self.status = Into::<Status>::into(&response.status().unpack());
+                    if self.status.code == ErrorCode::OK {
+                        self.headers = Some(Headers::WatchResource {
+                            events: response
+                                .events()
+                                .iter()
+                                .map(|e| e.unpack())
+                                .map(|et| ResourceEvent::from(&et))
+                                .collect(),
+                            version: response.resource_version(),
+                        })
+                    }
+                }
+
+                Err(e) => {
+                    error!("Failed to parse Watch resource response header: {:?}", e);
+                }
+            }
+        }
+    }
+
+    pub fn on_update_stream(&mut self, frame: &Frame) {
+        if let Some(buf) = frame.header.as_ref() {
+            match flatbuffers::root::<UpdateStreamResponse>(buf) {
+                Ok(response) => {
+                    self.status = Into::<Status>::into(&response.status().unpack());
+                    if self.status.code == ErrorCode::OK {
+                        self.headers = Some(Headers::UpdateStream {
+                            metadata: Into::<StreamMetadata>::into(&response.stream().unpack()),
+                        })
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to parse the response header: {:?}", e);
+                }
+            }
+        }
+    }
+
+    pub fn on_trim_stream(&mut self, frame: &Frame) {
+        if let Some(buf) = frame.header.as_ref() {
+            match flatbuffers::root::<TrimStreamResponse>(buf) {
+                Ok(response) => {
+                    self.status = Into::<Status>::into(&response.status().unpack());
+                    if self.status.code == ErrorCode::OK {}
+                }
+                Err(e) => {
+                    error!("Failed to parse the response header: {:?}", e);
+                }
+            }
+        }
+    }
+
+    pub fn on_delete_stream(&mut self, frame: &Frame) {
+        if let Some(buf) = frame.header.as_ref() {
+            match flatbuffers::root::<DeleteStreamResponse>(buf) {
+                Ok(response) => {
+                    self.status = Into::<Status>::into(&response.status().unpack());
+                    if self.status.code == ErrorCode::OK {}
+                }
+                Err(e) => {
+                    error!("Failed to parse the response header: {:?}", e);
                 }
             }
         }

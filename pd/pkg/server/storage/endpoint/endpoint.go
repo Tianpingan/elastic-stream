@@ -27,15 +27,6 @@ const (
 	_int32Len    = 11
 )
 
-const (
-	// MinStreamID is the minimum stream ID.
-	MinStreamID int64 = 0
-	// MinRangeIndex is the minimum range index.
-	MinRangeIndex int32 = 0
-	// MinRangeServerID is the minimum range server ID.
-	MinRangeServerID int32 = 0
-)
-
 // Endpoint is the base underlying storage endpoint for all other upper
 // specific storage backends. It should define some common storage interfaces and operations,
 // which provides the default implementations for all kinds of storages.
@@ -47,9 +38,9 @@ type Endpoint struct {
 
 // NewEndpoint creates a new base storage endpoint with the given KV.
 // It should be embedded inside a storage backend.
-func NewEndpoint(kv2 kv.KV, logger *zap.Logger) *Endpoint {
+func NewEndpoint(kv kv.KV, logger *zap.Logger) *Endpoint {
 	return &Endpoint{
-		KV: kv2,
+		KV: kv,
 		lg: logger,
 	}
 }

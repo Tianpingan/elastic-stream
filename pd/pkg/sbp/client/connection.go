@@ -14,7 +14,6 @@ import (
 
 	"github.com/AutoMQ/pd/api/rpcfb/rpcfb"
 	"github.com/AutoMQ/pd/pkg/sbp/codec"
-	"github.com/AutoMQ/pd/pkg/sbp/codec/operation"
 	"github.com/AutoMQ/pd/pkg/sbp/protocol"
 )
 
@@ -262,7 +261,7 @@ func (cc *conn) sendGoAway() error {
 	cc.wmu.Lock()
 	defer cc.wmu.Unlock()
 	// Send a graceful shutdown frame to server
-	f := codec.NewGoAwayFrame(maxStreamID, false)
+	f := codec.NewGoAwayFrame(maxStreamID, false, true)
 	if err := cc.fr.WriteFrame(f); err != nil {
 		return err
 	}
@@ -389,7 +388,7 @@ func (rl *connReadLoop) run() error {
 		case *codec.GoAwayFrame:
 			err = rl.processGoAway(f)
 		case *codec.DataFrame:
-			if f.OpCode.Code == operation.OpHeartbeat {
+			if f.OpCode == rpcfb.OperationCodeHEARTBEAT {
 				err = rl.processHeartbeat(f)
 			} else {
 				err = rl.processData(f)
@@ -507,7 +506,7 @@ func (rl *connReadLoop) parseResponse(f *codec.DataFrame) (resp protocol.InRespo
 
 	err = resp.Unmarshal(f.HeaderFmt, f.Header)
 	if err != nil {
-		return nil, errors.Wrap(err, "unmarshal response")
+		return nil, errors.WithMessage(err, "unmarshal response")
 	}
 	return
 }

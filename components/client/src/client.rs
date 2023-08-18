@@ -1,84 +1,158 @@
 use super::session_manager::SessionManager;
 
-use crate::{composite_session::CompositeSession, error::ClientError};
+use crate::{composite_session::CompositeSession, heartbeat::HeartbeatData};
 
 use bytes::Bytes;
 use log::{error, trace, warn};
 use model::{
-    client_role::ClientRole, range::RangeMetadata, request::fetch::FetchRequest,
-    response::fetch::FetchResultSet, stream::StreamMetadata, AppendResultEntry, ListRangeCriteria,
+    error::EsError,
+    object::ObjectMetadata,
+    range::RangeMetadata,
+    replica::RangeProgress,
+    request::fetch::FetchRequest,
+    response::{
+        fetch::FetchResultSet,
+        resource::{ListResourceResult, WatchResourceResult},
+    },
+    stream::StreamMetadata,
+    AppendResultEntry, ListRangeCriteria,
 };
 use observation::metrics::{
     store_metrics::RangeServerStatistics,
     sys_metrics::{DiskStatistics, MemoryStatistics},
     uring_metrics::UringStatistics,
 };
-use protocol::rpc::header::SealKind;
-use std::{cell::UnsafeCell, rc::Rc, sync::Arc};
+use protocol::rpc::header::{ErrorCode, RangeServerState, ResourceType, SealKind, StreamT};
+use std::{cell::UnsafeCell, rc::Rc, sync::Arc, time::Duration};
 use tokio::{sync::broadcast, time};
 
+#[cfg(any(test, feature = "mock"))]
+use mockall::automock;
+
+/// Definition of core storage trait.
+#[cfg_attr(any(test, feature = "mock"), automock)]
+pub trait Client {
+    async fn allocate_id(&self, host: &str) -> Result<i32, EsError>;
+
+    async fn list_ranges(&self, criteria: ListRangeCriteria)
+        -> Result<Vec<RangeMetadata>, EsError>;
+
+    async fn broadcast_heartbeat(&self, data: &HeartbeatData);
+
+    async fn create_stream(&self, stream: StreamT) -> Result<StreamMetadata, EsError>;
+
+    async fn describe_stream(&self, stream_id: u64) -> Result<StreamMetadata, EsError>;
+
+    async fn create_range(&self, range_metadata: RangeMetadata) -> Result<RangeMetadata, EsError>;
+
+    async fn create_range_replica(
+        &self,
+        target: &str,
+        range_metadata: RangeMetadata,
+    ) -> Result<(), EsError>;
+
+    async fn seal<'a>(
+        &self,
+        target: Option<&'a str>,
+        kind: SealKind,
+        range: RangeMetadata,
+    ) -> Result<RangeMetadata, EsError>;
+
+    async fn append(
+        &self,
+        target: &str,
+        buf: Vec<Bytes>,
+    ) -> Result<Vec<AppendResultEntry>, EsError>;
+
+    async fn fetch(&self, target: &str, request: FetchRequest) -> Result<FetchResultSet, EsError>;
+
+    async fn report_metrics(
+        &self,
+        target: &str,
+        state: RangeServerState,
+        uring_statistics: &UringStatistics,
+        range_server_statistics: &RangeServerStatistics,
+        disk_statistics: &DiskStatistics,
+        memory_statistics: &MemoryStatistics,
+    ) -> Result<(), EsError>;
+
+    async fn report_range_progress(&self, progress: Vec<RangeProgress>) -> Result<(), EsError>;
+
+    async fn commit_object(&self, metadata: ObjectMetadata) -> Result<(), EsError>;
+
+    async fn list_resource(
+        &self,
+        types: &[ResourceType],
+        limit: i32,
+        continuation: &Option<Bytes>,
+    ) -> Result<ListResourceResult, EsError>;
+
+    async fn watch_resource(
+        &self,
+        types: &[ResourceType],
+        version: i64,
+        timeout: Duration,
+    ) -> Result<WatchResourceResult, EsError>;
+
+    async fn target_go_away(&self, target: &str) -> Result<bool, EsError>;
+
+    async fn update_stream(
+        &self,
+        stream_id: u64,
+        replica_count: Option<u8>,
+        ack_count: Option<u8>,
+        epoch: Option<u64>,
+    ) -> Result<StreamMetadata, EsError>;
+
+    async fn trim_stream(&self, stream_id: u64, epoch: u64, min_offset: u64)
+        -> Result<(), EsError>;
+
+    async fn delete_stream(&self, stream_id: u64, epoch: u64) -> Result<(), EsError>;
+}
+
 /// `Client` is used to send
-pub struct Client {
+pub struct DefaultClient {
     pub(crate) session_manager: Rc<UnsafeCell<SessionManager>>,
     pub(crate) config: Arc<config::Configuration>,
 }
 
-impl Client {
-    pub fn new(config: Arc<config::Configuration>, shutdown: broadcast::Sender<()>) -> Self {
-        let session_manager = Rc::new(UnsafeCell::new(SessionManager::new(&config, shutdown)));
-
-        Self {
-            session_manager,
-            config,
-        }
-    }
-
-    pub async fn allocate_id(&self, host: &str) -> Result<i32, ClientError> {
-        let session_manager = unsafe { &mut *self.session_manager.get() };
-        let composite_session = session_manager
-            .get_composite_session(&self.config.placement_driver)
-            .await?;
+impl Client for DefaultClient {
+    async fn allocate_id(&self, host: &str) -> Result<i32, EsError> {
+        let composite_session = self.get_pd_session().await?;
         let future = composite_session.allocate_id(host, None);
         time::timeout(self.config.client_io_timeout(), future)
             .await
             .map_err(|e| {
                 warn!("Timeout when allocate ID. {}", e);
-                ClientError::RpcTimeout {
-                    timeout: self.config.client_io_timeout(),
-                }
+                EsError::new(ErrorCode::RPC_TIMEOUT, "allocate ID rpc timeout")
             })?
             .map_err(|e| {
                 error!(
                     "Failed to receive response from composite session. Cause: {:?}",
                     e
                 );
-                ClientError::ClientInternal
+                EsError::new(ErrorCode::ERROR_CODE_UNSPECIFIED, "todo")
             })
     }
 
-    pub async fn list_ranges(
+    async fn list_ranges(
         &self,
         criteria: ListRangeCriteria,
-    ) -> Result<Vec<RangeMetadata>, ClientError> {
-        let session_manager = unsafe { &mut *self.session_manager.get() };
-        let session = session_manager
-            .get_composite_session(&self.config.placement_driver)
-            .await?;
+    ) -> Result<Vec<RangeMetadata>, EsError> {
+        let session = self.get_pd_session().await?;
         let future = session.list_range(criteria);
         time::timeout(self.config.client_io_timeout(), future)
             .await
             .map_err(|elapsed| {
                 warn!("Timeout when list range. {}", elapsed);
-                ClientError::RpcTimeout {
-                    timeout: self.config.client_io_timeout(),
-                }
+                EsError::new(ErrorCode::RPC_TIMEOUT, "list ranges rpc timeout")
             })?
             .map_err(|e| {
                 error!(
                     "Failed to receive response from broken channel. Cause: {:?}",
                     e
                 );
-                ClientError::ClientInternal
+                EsError::new(ErrorCode::ERROR_CODE_UNSPECIFIED, "todo")
             })
     }
 
@@ -89,64 +163,45 @@ impl Client {
     ///
     /// # Returns
     ///
-    pub async fn broadcast_heartbeat(&self, role: ClientRole) {
+    async fn broadcast_heartbeat(&self, data: &HeartbeatData) {
         let session_manager = unsafe { &mut *self.session_manager.get() };
-        session_manager.broadcast_heartbeat(role).await;
+        session_manager.broadcast_heartbeat(data).await;
     }
 
-    pub async fn create_stream(
-        &self,
-        stream_metadata: StreamMetadata,
-    ) -> Result<StreamMetadata, ClientError> {
-        let session_manager = unsafe { &mut *self.session_manager.get() };
-        let composite_session = session_manager
-            .get_composite_session(&self.config.placement_driver)
-            .await?;
+    async fn create_stream(&self, stream_metadata: StreamT) -> Result<StreamMetadata, EsError> {
+        let composite_session = self.get_pd_session().await?;
         let future = composite_session.create_stream(stream_metadata);
         time::timeout(self.config.client_io_timeout(), future)
             .await
             .map_err(|e| {
                 error!("Timeout when create stream. {}", e);
-                ClientError::RpcTimeout {
-                    timeout: self.config.client_io_timeout(),
-                }
+                EsError::new(ErrorCode::RPC_TIMEOUT, "create stream rpc timeout")
             })?
     }
 
-    pub async fn describe_stream(&self, stream_id: u64) -> Result<StreamMetadata, ClientError> {
-        let session_manager = unsafe { &mut *self.session_manager.get() };
-        let composite_session = session_manager
-            .get_composite_session(&self.config.placement_driver)
-            .await?;
+    async fn describe_stream(&self, stream_id: u64) -> Result<StreamMetadata, EsError> {
+        let composite_session = self.get_pd_session().await?;
         let future = composite_session.describe_stream(stream_id);
         time::timeout(self.config.client_io_timeout(), future)
             .await
             .map_err(|e| {
                 error!("Timeout when describe stream[stream-id={stream_id}]. {}", e);
-                ClientError::RpcTimeout {
-                    timeout: self.config.client_io_timeout(),
-                }
+                EsError::new(ErrorCode::RPC_TIMEOUT, "describe stream rpc timeout")
             })?
     }
 
     /// Create a new range by send request to placement driver.
-    pub async fn create_range(
-        &self,
-        range_metadata: RangeMetadata,
-    ) -> Result<RangeMetadata, ClientError> {
-        let session_manager = unsafe { &mut *self.session_manager.get() };
-        let composite_session = session_manager
-            .get_composite_session(&self.config.placement_driver)
-            .await?;
+    async fn create_range(&self, range_metadata: RangeMetadata) -> Result<RangeMetadata, EsError> {
+        let composite_session = self.get_pd_session().await?;
         self.create_range0(composite_session, range_metadata).await
     }
 
     /// Create a new range replica by send request to range server.
-    pub async fn create_range_replica(
+    async fn create_range_replica(
         &self,
         target: &str,
         range_metadata: RangeMetadata,
-    ) -> Result<(), ClientError> {
+    ) -> Result<(), EsError> {
         let session_manager = unsafe { &mut *self.session_manager.get() };
         let composite_session = session_manager.get_composite_session(target).await?;
         trace!("Create range replica to composite-channel={}", target);
@@ -155,34 +210,21 @@ impl Client {
             .map(|_| ())
     }
 
-    async fn create_range0(
+    async fn seal<'a>(
         &self,
-        composite_session: Rc<CompositeSession>,
-        range: RangeMetadata,
-    ) -> Result<RangeMetadata, ClientError> {
-        let future = composite_session.create_range(range);
-        time::timeout(self.config.client_io_timeout(), future)
-            .await
-            .map_err(|e| {
-                error!("Timeout when create range. {}", e);
-                ClientError::RpcTimeout {
-                    timeout: self.config.client_io_timeout(),
-                }
-            })?
-    }
-
-    pub async fn seal(
-        &self,
-        target: Option<&str>,
+        target: Option<&'a str>,
         kind: SealKind,
         range: RangeMetadata,
-    ) -> Result<RangeMetadata, ClientError> {
+    ) -> Result<RangeMetadata, EsError> {
         // Validate request
         match kind {
             SealKind::RANGE_SERVER => {
                 if target.is_none() {
                     error!("Target is required while seal range against range servers");
-                    return Err(ClientError::BadRequest);
+                    return Err(EsError::new(
+                        ErrorCode::UNEXPECTED,
+                        "target is required when seal range against range servers",
+                    ));
                 }
             }
             SealKind::PLACEMENT_DRIVER => {
@@ -190,12 +232,15 @@ impl Client {
                     error!(
                         "SealRange.range.end MUST be present while seal against placement driver"
                     );
-                    return Err(ClientError::BadRequest);
+                    return Err(EsError::new(
+                        ErrorCode::UNEXPECTED,
+                        "end_offset is required when seal range against range servers",
+                    ));
                 }
             }
             _ => {
                 error!("Seal request kind must specify");
-                return Err(ClientError::BadRequest);
+                return Err(EsError::new(ErrorCode::UNEXPECTED, "seal kind is empty"));
             }
         }
 
@@ -214,42 +259,32 @@ impl Client {
             .await
             .map_err(|_| {
                 error!("Timeout when seal range");
-                ClientError::RpcTimeout {
-                    timeout: self.config.client_io_timeout(),
-                }
+                EsError::new(ErrorCode::RPC_TIMEOUT, "seal range rpc timeout")
             })?
     }
 
     /// Append data to a range.
-    pub async fn append(
+    async fn append(
         &self,
         target: &str,
         buf: Vec<Bytes>,
-    ) -> Result<Vec<AppendResultEntry>, ClientError> {
+    ) -> Result<Vec<AppendResultEntry>, EsError> {
         let session_manager = unsafe { &mut *self.session_manager.get() };
         let session = session_manager.get_composite_session(target).await?;
         let future = session.append(buf);
         time::timeout(self.config.client_io_timeout(), future)
             .await
-            .map_err(|_e| ClientError::RpcTimeout {
-                timeout: self.config.client_io_timeout(),
-            })?
+            .map_err(|_e| EsError::new(ErrorCode::RPC_TIMEOUT, "append rpc timeout"))?
     }
 
     /// Fetch data from a range replica.
-    pub async fn fetch(
-        &self,
-        target: &str,
-        request: FetchRequest,
-    ) -> Result<FetchResultSet, ClientError> {
+    async fn fetch(&self, target: &str, request: FetchRequest) -> Result<FetchResultSet, EsError> {
         let session_manager = unsafe { &mut *self.session_manager.get() };
         let session = session_manager.get_composite_session(target).await?;
         let future = session.fetch(request);
         time::timeout(self.config.client_io_timeout(), future)
             .await
-            .map_err(|_e| ClientError::RpcTimeout {
-                timeout: self.config.client_io_timeout(),
-            })?
+            .map_err(|_e| EsError::new(ErrorCode::RPC_TIMEOUT, "fetch rpc timeout"))?
     }
 
     /// Report metrics to placement driver
@@ -259,20 +294,22 @@ impl Client {
     ///
     /// # Returns
     ///
-    pub async fn report_metrics(
+    async fn report_metrics(
         &self,
         target: &str,
+        state: RangeServerState,
         uring_statistics: &UringStatistics,
         range_server_statistics: &RangeServerStatistics,
         disk_statistics: &DiskStatistics,
         memory_statistics: &MemoryStatistics,
-    ) -> Result<(), ClientError> {
+    ) -> Result<(), EsError> {
         let session_manager = unsafe { &mut *self.session_manager.get() };
         let composite_session = session_manager.get_composite_session(target).await?;
         trace!("Report metrics to composite-channel={}", target);
 
         composite_session
             .report_metrics(
+                state,
                 uring_statistics,
                 range_server_statistics,
                 disk_statistics,
@@ -280,15 +317,162 @@ impl Client {
             )
             .await
     }
+
+    async fn report_range_progress(&self, progress: Vec<RangeProgress>) -> Result<(), EsError> {
+        let composite_session = self.get_pd_session().await?;
+        let future = composite_session.report_range_progress(progress);
+        time::timeout(self.config.client_io_timeout(), future)
+            .await
+            .map_err(|_| EsError::new(ErrorCode::RPC_TIMEOUT, "watch resource timeout"))?
+    }
+
+    async fn commit_object(&self, metadata: ObjectMetadata) -> Result<(), EsError> {
+        let composite_session = self.get_pd_session().await?;
+        let future = composite_session.commit_object(metadata);
+        time::timeout(self.config.client_io_timeout(), future)
+            .await
+            .map_err(|_| EsError::new(ErrorCode::RPC_TIMEOUT, "commit object timeout"))?
+    }
+
+    /// List resources from PD of given types.
+    ///
+    /// # Arguments
+    /// * `types` - Resource types to list.
+    /// * `limit` - Maximum number of resources to list. If zero, no limit.
+    /// * `continuation` - Optional. Continuation token from previous list.
+    ///
+    /// # Returns
+    /// * `ListResourceResult` - List of resources, and a continuation token if the result is truncated.
+    ///
+    /// TODO: Error handling
+    ///
+    async fn list_resource(
+        &self,
+        types: &[ResourceType],
+        limit: i32,
+        continuation: &Option<Bytes>,
+    ) -> Result<ListResourceResult, EsError> {
+        let composite_session = self.get_pd_session().await?;
+        let future = composite_session.list_resource(types, limit, continuation);
+        time::timeout(self.config.client_io_timeout(), future)
+            .await
+            .map_err(|_| EsError::new(ErrorCode::RPC_TIMEOUT, "list resource timeout"))?
+    }
+
+    /// Watch resources from PD of given types on given version.
+    ///
+    /// # Arguments
+    /// * `types` - Resource types to watch.
+    /// * `version` - Resource version to watch. All changes with a version greater than this version will be returned.
+    /// * `timeout` - If no resource change after this timeout, the watch will be cancelled.
+    ///
+    /// # Returns
+    /// * `WatchResourceResult` - List of resource events.
+    ///
+    /// TODO: Error handling
+    ///
+    async fn watch_resource(
+        &self,
+        types: &[ResourceType],
+        version: i64,
+        timeout: Duration,
+    ) -> Result<WatchResourceResult, EsError> {
+        let composite_session = self.get_pd_session().await?;
+        let future = composite_session.watch_resource(types, version, timeout);
+        // Use the watch timeout instead of client timeout, as this is a long polling request
+        time::timeout(timeout, future)
+            .await
+            .map_err(|_| EsError::new(ErrorCode::RPC_TIMEOUT, "watch resource timeout"))?
+    }
+
+    /// Check if the peer server has notified it would go away for maintenance.
+    ///
+    /// Note that overhead of this method is minimal.
+    ///
+    /// # Return
+    /// * Ok(true) - if the target has already notified its scheduled shutdown;
+    /// * Ok(false) - otherwise.
+    async fn target_go_away(&self, target: &str) -> Result<bool, EsError> {
+        let session_manager = unsafe { &mut *self.session_manager.get() };
+        let session = session_manager.get_composite_session(target).await?;
+        Ok(session.go_away())
+    }
+
+    async fn update_stream(
+        &self,
+        stream_id: u64,
+        replica_count: Option<u8>,
+        ack_count: Option<u8>,
+        epoch: Option<u64>,
+    ) -> Result<StreamMetadata, EsError> {
+        let composite_session = self.get_pd_session().await?;
+        let future = composite_session.update_stream(stream_id, replica_count, ack_count, epoch);
+        time::timeout(self.config.client_io_timeout(), future)
+            .await
+            .map_err(|_| EsError::new(ErrorCode::RPC_TIMEOUT, "update stream timeout"))?
+    }
+
+    async fn trim_stream(
+        &self,
+        stream_id: u64,
+        epoch: u64,
+        min_offset: u64,
+    ) -> Result<(), EsError> {
+        let composite_session = self.get_pd_session().await?;
+        let future = composite_session.trim_stream(stream_id, epoch, min_offset);
+        time::timeout(self.config.client_io_timeout(), future)
+            .await
+            .map_err(|_| EsError::new(ErrorCode::RPC_TIMEOUT, "trim stream timeout"))?
+    }
+
+    async fn delete_stream(&self, stream_id: u64, epoch: u64) -> Result<(), EsError> {
+        let composite_session = self.get_pd_session().await?;
+        let future = composite_session.delete_stream(stream_id, epoch);
+        time::timeout(self.config.client_io_timeout(), future)
+            .await
+            .map_err(|_| EsError::new(ErrorCode::RPC_TIMEOUT, "delete stream timeout"))?
+    }
+}
+
+impl DefaultClient {
+    pub fn new(config: Arc<config::Configuration>, shutdown: broadcast::Sender<()>) -> Self {
+        let session_manager = Rc::new(UnsafeCell::new(SessionManager::new(&config, shutdown)));
+
+        Self {
+            session_manager,
+            config,
+        }
+    }
+
+    async fn create_range0(
+        &self,
+        composite_session: Rc<CompositeSession>,
+        range: RangeMetadata,
+    ) -> Result<RangeMetadata, EsError> {
+        let future = composite_session.create_range(range);
+        time::timeout(self.config.client_io_timeout(), future)
+            .await
+            .map_err(|e| {
+                error!("Timeout when create range. {}", e);
+                EsError::new(ErrorCode::RPC_TIMEOUT, "create range rpc timeout")
+            })?
+    }
+
+    async fn get_pd_session(&self) -> Result<Rc<CompositeSession>, EsError> {
+        let session_manager = unsafe { &mut *self.session_manager.get() };
+        session_manager
+            .get_composite_session(&self.config.placement_driver)
+            .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use bytes::BytesMut;
+    use bytes::{Bytes, BytesMut};
     use log::trace;
     use mock_server::run_listener;
-    use model::client_role::ClientRole;
-    use model::stream::StreamMetadata;
+    use model::error::EsError;
+    use model::resource::{EventType, Resource};
     use model::ListRangeCriteria;
     use model::{
         range::RangeMetadata,
@@ -299,48 +483,50 @@ mod tests {
         sys_metrics::{DiskStatistics, MemoryStatistics},
         uring_metrics::UringStatistics,
     };
-    use protocol::rpc::header::SealKind;
+    use protocol::rpc::header::{ClientRole, RangeServerState, ResourceType, SealKind, StreamT};
     use std::{error::Error, sync::Arc};
     use tokio::sync::broadcast;
 
-    use crate::{
-        error::{ClientError, ListRangeError},
-        Client,
-    };
+    use crate::{client::Client, heartbeat::HeartbeatData, DefaultClient};
 
     #[test]
-    fn test_broadcast_heartbeat() -> Result<(), ClientError> {
+    fn test_broadcast_heartbeat() -> Result<(), Box<dyn Error>> {
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 2378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.placement_driver = format!("localhost:{}", port);
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
+            let mut config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             config.check_and_apply().unwrap();
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(Arc::clone(&config), tx);
-            client.broadcast_heartbeat(ClientRole::RangeServer).await;
+            let client = DefaultClient::new(Arc::clone(&config), tx);
+            let heartbeat_data = HeartbeatData {
+                mandatory: false,
+                role: ClientRole::CLIENT_ROLE_RANGE_SERVER,
+                state: Some(RangeServerState::RANGE_SERVER_STATE_READ_WRITE),
+            };
+            client.broadcast_heartbeat(&heartbeat_data).await;
             Ok(())
         })
     }
 
     #[test]
     fn test_allocate_id() -> Result<(), Box<dyn Error>> {
-        crate::log::try_init_log();
+        ulog::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 2378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
-            config.placement_driver = format!("localhost:{}", port);
+            let config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(config, tx);
+            let client = DefaultClient::new(config, tx);
             let id = client.allocate_id("localhost").await?;
             assert_eq!(1, id);
             Ok(())
@@ -349,28 +535,27 @@ mod tests {
 
     #[test]
     fn test_create_stream() -> Result<(), Box<dyn Error>> {
-        crate::log::try_init_log();
+        ulog::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 12378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
-            config.placement_driver = format!("localhost:{}", port);
+            let config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(config, tx);
-            let stream_metadata = client
-                .create_stream(StreamMetadata {
-                    stream_id: None,
-                    replica: 1,
-                    ack_count: 1,
-                    retention_period: std::time::Duration::from_secs(1),
-                })
-                .await?;
+            let client = DefaultClient::new(config, tx);
+            let mut stream_t = StreamT::default();
+            stream_t.replica = 1;
+            stream_t.ack_count = 1;
+            stream_t.retention_period_ms = 1000;
+            stream_t.epoch = 0;
+            stream_t.start_offset = 0;
+            let stream_metadata = client.create_stream(stream_t).await?;
             dbg!(&stream_metadata);
-            assert!(stream_metadata.stream_id.is_some());
+            assert!(stream_metadata.stream_id > 0);
             assert_eq!(1, stream_metadata.replica);
             assert_eq!(
                 std::time::Duration::from_secs(1),
@@ -381,25 +566,25 @@ mod tests {
     }
 
     #[test]
-    fn test_describe_stream() -> Result<(), Box<dyn Error>> {
-        crate::log::try_init_log();
+    fn test_describe_stream() -> Result<(), EsError> {
+        ulog::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 12378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
-            config.placement_driver = format!("localhost:{}", port);
+            let config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(config, tx);
+            let client = DefaultClient::new(config, tx);
 
             let stream_metadata = client
                 .describe_stream(1)
                 .await
                 .expect("Describe stream should not fail");
-            assert_eq!(Some(1), stream_metadata.stream_id);
+            assert_eq!(1, stream_metadata.stream_id);
             assert_eq!(1, stream_metadata.replica);
             assert_eq!(
                 std::time::Duration::from_secs(3600 * 24),
@@ -410,28 +595,28 @@ mod tests {
     }
 
     #[test]
-    fn test_create_range() -> Result<(), ClientError> {
-        crate::log::try_init_log();
+    fn test_create_range() -> Result<(), EsError> {
+        ulog::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 12378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
-            config.placement_driver = format!("localhost:{}", port);
+            let config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             let target = config.placement_driver.clone();
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(config, tx);
+            let client = DefaultClient::new(config, tx);
             let range = RangeMetadata::new(100, 0, 0, 0, None);
             client.create_range_replica(&target, range).await
         })
     }
 
     #[test]
-    fn test_create_range_range_server() -> Result<(), ClientError> {
-        crate::log::try_init_log();
+    fn test_create_range_range_server() -> Result<(), EsError> {
+        ulog::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let placement_driver_port = 12378;
@@ -441,42 +626,41 @@ mod tests {
             let range_server_port = 10911;
             let range_server_port = run_listener().await;
 
-            let mut config = config::Configuration::default();
-            config.server.host = "127.0.0.1".to_owned();
-            config.server.port = range_server_port;
-            config.placement_driver = format!("127.0.0.1:{}", placement_driver_port);
+            let config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", placement_driver_port),
+                ..Default::default()
+            };
 
             let target = format!("127.0.0.1:{}", range_server_port);
 
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(config, tx);
+            let client = DefaultClient::new(config, tx);
             let range = RangeMetadata::new_range(203, 0, 0, 0, None, 1, 1);
             client.create_range_replica(&target, range).await
         })
     }
 
     #[test]
-    fn test_list_range_by_stream() -> Result<(), ListRangeError> {
-        crate::log::try_init_log();
+    fn test_list_range_by_stream() -> Result<(), EsError> {
+        ulog::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 2378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
-            config.placement_driver = format!("localhost:{}", port);
+            let config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(config, tx);
+            let client = DefaultClient::new(config, tx);
 
             for i in 1..2 {
                 let criteria = ListRangeCriteria::new(None, Some(i as u64));
                 let ranges = client.list_ranges(criteria).await.unwrap();
-                assert_eq!(
-                    false,
-                    ranges.is_empty(),
+                assert!(
+                    !ranges.is_empty(),
                     "Test server should have fed some mocking ranges"
                 );
                 for range in ranges.iter() {
@@ -489,26 +673,25 @@ mod tests {
     }
 
     #[test]
-    fn test_list_range_by_range_server() -> Result<(), ListRangeError> {
-        crate::log::try_init_log();
+    fn test_list_range_by_range_server() -> Result<(), EsError> {
+        ulog::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 2378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
-            config.placement_driver = format!("localhost:{}", port);
+            let config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(config, tx);
+            let client = DefaultClient::new(config, tx);
 
             for _i in 1..2 {
                 let criteria = ListRangeCriteria::new(None, None);
                 let ranges = client.list_ranges(criteria).await.unwrap();
-                assert_eq!(
-                    false,
-                    ranges.is_empty(),
+                assert!(
+                    !ranges.is_empty(),
                     "Test server should have fed some mocking ranges"
                 );
                 for range in ranges.iter() {
@@ -522,20 +705,20 @@ mod tests {
 
     /// Test seal range server without end. This RPC is used when the single writer takes over a stream from a failed writer.
     #[test]
-    fn test_seal_range_server() -> Result<(), ClientError> {
-        crate::log::try_init_log();
+    fn test_seal_range_server() -> Result<(), EsError> {
+        ulog::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 2378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.placement_driver = format!("localhost:{}", port);
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
+            let mut config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             config.check_and_apply().unwrap();
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(Arc::clone(&config), tx);
+            let client = DefaultClient::new(Arc::clone(&config), tx);
             let range = RangeMetadata::new(0, 0, 0, 0, None);
             let range = client
                 .seal(
@@ -555,20 +738,20 @@ mod tests {
 
     /// Test seal range server with end. This RPC is used when the single writer takes over a stream from a graceful closed writer.
     #[test]
-    fn test_seal_range_server_with_end() -> Result<(), ClientError> {
-        crate::log::try_init_log();
+    fn test_seal_range_server_with_end() -> Result<(), EsError> {
+        ulog::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 2378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.placement_driver = format!("localhost:{}", port);
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
+            let mut config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             config.check_and_apply().unwrap();
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(Arc::clone(&config), tx);
+            let client = DefaultClient::new(Arc::clone(&config), tx);
             let range = RangeMetadata::new(0, 0, 0, 0, Some(1));
             let range = client
                 .seal(
@@ -588,20 +771,20 @@ mod tests {
 
     /// Test seal placement driver.
     #[test]
-    fn test_seal_placement_driver() -> Result<(), ClientError> {
-        crate::log::try_init_log();
+    fn test_seal_placement_driver() -> Result<(), EsError> {
+        ulog::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 2378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.placement_driver = format!("localhost:{}", port);
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
+            let mut config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             config.check_and_apply().unwrap();
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(Arc::clone(&config), tx);
+            let client = DefaultClient::new(Arc::clone(&config), tx);
             let range = RangeMetadata::new(0, 0, 0, 0, Some(1));
             let range = client
                 .seal(
@@ -621,19 +804,19 @@ mod tests {
 
     #[test]
     fn test_append() -> Result<(), Box<dyn Error>> {
-        crate::log::try_init_log();
+        ulog::try_init_log();
         tokio_uring::start(async move {
             #[allow(unused_variables)]
             let port = 2378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.placement_driver = format!("localhost:{}", port);
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
+            let mut config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             config.check_and_apply().unwrap();
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(Arc::clone(&config), tx);
+            let client = DefaultClient::new(Arc::clone(&config), tx);
             let stream_id = 0;
             let index = 0;
 
@@ -674,20 +857,20 @@ mod tests {
     }
 
     #[test]
-    fn test_report_metrics() -> Result<(), ClientError> {
-        crate::log::try_init_log();
+    fn test_report_metrics() -> Result<(), EsError> {
+        ulog::try_init_log();
         tokio_uring::start(async {
             #[allow(unused_variables)]
             let port = 2378;
             let port = run_listener().await;
-            let mut config = config::Configuration::default();
-            config.placement_driver = format!("localhost:{}", port);
-            config.server.host = "localhost".to_owned();
-            config.server.port = 10911;
+            let mut config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
             config.check_and_apply().unwrap();
             let config = Arc::new(config);
             let (tx, _rx) = broadcast::channel(1);
-            let client = Client::new(Arc::clone(&config), tx);
+            let client = DefaultClient::new(Arc::clone(&config), tx);
             let uring_statistics = UringStatistics::new();
             let range_server_statistics = RangeServerStatistics::new();
             let disk_statistics = DiskStatistics::new();
@@ -695,6 +878,7 @@ mod tests {
             client
                 .report_metrics(
                     &config.placement_driver,
+                    RangeServerState::RANGE_SERVER_STATE_READ_WRITE,
                     &uring_statistics,
                     &range_server_statistics,
                     &disk_statistics,
@@ -702,5 +886,236 @@ mod tests {
                 )
                 .await
         })
+    }
+
+    #[test]
+    fn test_list_resource() -> Result<(), EsError> {
+        ulog::try_init_log();
+        tokio_uring::start(async {
+            #[allow(unused_variables)]
+            let port = 2378;
+            let port = run_listener().await;
+            let mut config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
+            config.check_and_apply().unwrap();
+            let config = Arc::new(config);
+            let (tx, _rx) = broadcast::channel(1);
+            let client = DefaultClient::new(Arc::clone(&config), tx);
+
+            let result = client
+                .list_resource(
+                    vec![
+                        ResourceType::RESOURCE_RANGE_SERVER,
+                        ResourceType::RESOURCE_STREAM,
+                        ResourceType::RESOURCE_RANGE,
+                        ResourceType::RESOURCE_OBJECT,
+                    ]
+                    .as_ref(),
+                    100,
+                    &Option::None::<Bytes>,
+                )
+                .await
+                .expect("List resource should not fail");
+
+            assert_eq!(400, result.version);
+            assert_eq!(None, result.continuation);
+            assert_eq!(4, result.resources.len());
+            check_range_server(&result.resources[0]);
+            check_stream(&result.resources[1]);
+            check_range(&result.resources[2]);
+            check_object(&result.resources[3]);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_watch_resource() -> Result<(), EsError> {
+        ulog::try_init_log();
+        tokio_uring::start(async {
+            #[allow(unused_variables)]
+            let port = 2378;
+            let port = run_listener().await;
+            let mut config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
+            config.check_and_apply().unwrap();
+            let config = Arc::new(config);
+            let (tx, _rx) = broadcast::channel(1);
+            let client = DefaultClient::new(Arc::clone(&config), tx);
+
+            let version = 100;
+            let result = client
+                .watch_resource(
+                    vec![
+                        ResourceType::RESOURCE_RANGE_SERVER,
+                        ResourceType::RESOURCE_STREAM,
+                        ResourceType::RESOURCE_RANGE,
+                        ResourceType::RESOURCE_OBJECT,
+                    ]
+                    .as_ref(),
+                    version,
+                    std::time::Duration::from_secs(100),
+                )
+                .await
+                .expect("Watch resource should not fail");
+
+            assert_eq!(version + 3, result.version);
+            assert_eq!(4, result.events.len());
+            assert_eq!(EventType::Added, result.events[0].event_type);
+            check_range_server(&result.events[0].resource);
+            assert_eq!(EventType::Modified, result.events[1].event_type);
+            check_stream(&result.events[1].resource);
+            assert_eq!(EventType::Deleted, result.events[2].event_type);
+            check_range(&result.events[2].resource);
+            assert_eq!(EventType::Added, result.events[3].event_type);
+            check_object(&result.events[3].resource);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_update_stream() -> Result<(), EsError> {
+        ulog::try_init_log();
+        tokio_uring::start(async move {
+            #[allow(unused_variables)]
+            let port = 2378;
+            let port = run_listener().await;
+            let config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
+            let config = Arc::new(config);
+            let (tx, _rx) = broadcast::channel(1);
+            let client = DefaultClient::new(config, tx);
+
+            let stream_metadata = client
+                .update_stream(1, None, None, Some(1))
+                .await
+                .expect("Update stream should not fail");
+            assert_eq!(1, stream_metadata.stream_id);
+            assert_eq!(1, stream_metadata.epoch);
+            assert_eq!(
+                std::time::Duration::from_secs(3600 * 24),
+                stream_metadata.retention_period
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_trim_stream() -> Result<(), EsError> {
+        ulog::try_init_log();
+        tokio_uring::start(async move {
+            #[allow(unused_variables)]
+            let port = 2378;
+            let port = run_listener().await;
+            let config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
+            let config = Arc::new(config);
+            let (tx, _rx) = broadcast::channel(1);
+            let client = DefaultClient::new(config, tx);
+
+            client
+                .trim_stream(1, 233, 100)
+                .await
+                .expect("trim stream should not fail");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_delete_stream() -> Result<(), EsError> {
+        ulog::try_init_log();
+        tokio_uring::start(async move {
+            #[allow(unused_variables)]
+            let port = 2378;
+            let port = run_listener().await;
+            let config = config::Configuration {
+                placement_driver: format!("127.0.0.1:{}", port),
+                ..Default::default()
+            };
+            let config = Arc::new(config);
+            let (tx, _rx) = broadcast::channel(1);
+            let client = DefaultClient::new(config, tx);
+
+            client
+                .delete_stream(1, 233)
+                .await
+                .expect("trim stream should not fail");
+            Ok(())
+        })
+    }
+
+    fn check_range_server(resource: &Resource) {
+        match resource {
+            Resource::RangeServer(range_server) => {
+                assert_eq!(42, range_server.server_id);
+                assert_eq!(
+                    String::from("127.0.0.1:10911"),
+                    range_server.advertise_address
+                );
+            }
+            _ => {
+                panic!("Should be range server")
+            }
+        }
+    }
+
+    fn check_stream(resource: &Resource) {
+        match resource {
+            Resource::Stream(stream) => {
+                assert_eq!(42, stream.stream_id);
+                assert_eq!(2, stream.replica);
+                assert_eq!(1, stream.ack_count);
+                assert_eq!(
+                    std::time::Duration::from_secs(3600 * 24),
+                    stream.retention_period
+                );
+            }
+            _ => {
+                panic!("Should be stream")
+            }
+        }
+    }
+
+    fn check_range(resource: &Resource) {
+        match resource {
+            Resource::Range(range) => {
+                assert_eq!(42, range.stream_id());
+                assert_eq!(0, range.index());
+                assert_eq!(13, range.epoch());
+                assert_eq!(0, range.start());
+                assert_eq!(100, range.end().unwrap());
+                assert_eq!(1, range.replica().len());
+                assert_eq!(42, range.replica()[0].server_id);
+                assert_eq!(2, range.replica_count());
+                assert_eq!(1, range.ack_count());
+            }
+            _ => {
+                panic!("Should be range")
+            }
+        }
+    }
+
+    fn check_object(resource: &Resource) {
+        match resource {
+            Resource::Object(object) => {
+                assert_eq!(42, object.stream_id);
+                assert_eq!(0, object.range_index);
+                assert_eq!(1, object.epoch);
+                assert_eq!(10, object.start_offset);
+                assert_eq!(10, object.end_offset_delta);
+                assert_eq!(1024, object.data_len);
+            }
+            _ => {
+                panic!("Should be object")
+            }
+        }
     }
 }
