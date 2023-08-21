@@ -1,14 +1,8 @@
 package com.automq.elasticstream.client.tools.longrunning;
 
 import org.apache.log4j.Logger;
-
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 import com.automq.elasticstream.client.api.Client;
 import com.automq.elasticstream.client.api.CreateStreamOptions;
 import com.automq.elasticstream.client.api.Stream;
@@ -16,7 +10,7 @@ import com.automq.elasticstream.client.api.Stream;
 public class LongRunning {
     private static Logger log = Logger.getLogger(LongRunning.class.getClass());
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) {
         LongRunningOption option = new LongRunningOption();
         log.info("EndPoint: " + option.getEndPoint() + ", KvEndPoint: " +
                 option.getKvEndPoint()
@@ -26,38 +20,50 @@ public class LongRunning {
                 + option.getMin() + ", PayloadSizeMax: " + option.getMax());
         Client client = Client.builder().endpoint(option.getEndPoint()).kvEndpoint(option.getKvEndPoint())
                 .build();
-        ExecutorService executor = Executors.newFixedThreadPool(9);
+        Thread[] array = new Thread[3];
         for (int replica = 1; replica <= 3; replica++) {
             int finalReplica = replica;
-            executor.submit(() -> {
+            array[replica - 1] = new Thread(() -> {
                 while (true) {
-                    Lock lock = new ReentrantLock();
-                    Condition condition = lock.newCondition();
-                    Stream stream = client.streamClient()
-                            .createAndOpenStream(CreateStreamOptions.newBuilder().replicaCount(finalReplica).build())
-                            .get();
-                    AtomicLong endOffset = new AtomicLong(0);
-                    AtomicBoolean stopped = new AtomicBoolean(false);
-                    long startSeq = Utils.getRandomInt(0, 1024);
-                    executor.submit(new Producer(stream, startSeq,
-                            option.getMin(), option.getMax(), option.getInterval(),
-                            endOffset, stopped,
-                            lock, condition));
-                    executor.submit(new TailReadConsumer(stream, startSeq, endOffset, stopped,
-                            lock, condition));
-                    executor.submit(new RepeatedReadConsumer(stream, startSeq, endOffset, stopped,
-                            lock, condition));
-                    lock.lock();
                     try {
-                        while (!stopped.get()) {
-                            condition.await();
-                        }
-                    } finally {
-                        lock.unlock();
+                        Stream stream = client.streamClient()
+                                .createAndOpenStream(CreateStreamOptions.newBuilder()
+                                        .replicaCount(finalReplica).build())
+                                .get();
+                        AtomicLong endOffset = new AtomicLong(0);
+                        long startSeq = Utils.getRandomInt(0, 1024);
+                        Producer producer = new Producer(stream, startSeq,
+                                option.getMin(), option.getMax(), option.getInterval(),
+                                endOffset, finalReplica);
+                        TailReadConsumer tailReadConsumer = new TailReadConsumer(stream, startSeq, endOffset,
+                                producer);
+                        RepeatedReadConsumer repeatedReadConsumer = new RepeatedReadConsumer(stream, startSeq,
+                                endOffset, producer);
+                        Thread producerThread = new Thread(producer);
+                        producerThread.start();
+                        Thread tailReadConsumerThread = new Thread(tailReadConsumer);
+                        tailReadConsumerThread.start();
+                        Thread repeatedReadConsumerThread = new Thread(repeatedReadConsumer);
+                        repeatedReadConsumerThread.start();
+
+                        producerThread.join();
+                        tailReadConsumerThread.join();
+                        repeatedReadConsumerThread.join();
+                    } catch (InterruptedException | ExecutionException e) {
+                        log.error(e);
                     }
                 }
             });
         }
-
+        for (int i = 0; i < 3; i++) {
+            array[i].start();
+        }
+        for (int i = 0; i < 3; i++) {
+            try {
+                array[i].join();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
     }
 }

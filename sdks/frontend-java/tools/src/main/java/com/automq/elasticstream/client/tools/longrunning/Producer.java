@@ -5,11 +5,7 @@ import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
-
 import com.automq.elasticstream.client.DefaultRecordBatch;
 import com.automq.elasticstream.client.api.AppendResult;
 import com.automq.elasticstream.client.api.Stream;
@@ -23,15 +19,15 @@ public class Producer implements Runnable {
     private long interval;
     private long nextSeq;
     private AtomicLong endOffset;
-    private AtomicBoolean stopped;
-    private Lock lock;
-    private Condition condition;
     private long previousTimestamp;
+    private volatile boolean shouldTerminate = false;
+    private int replica = 0;
+
     // 10s
     public static final long TIME_OUT = 1000 * 10;
 
     public Producer(Stream stream, long startSeq, int minSize, int maxSize, long interval,
-            AtomicLong endOffset, AtomicBoolean stopped, Lock lock, Condition condition) {
+            AtomicLong endOffset, int replica) {
         this.stream = stream;
         this.startSeq = startSeq;
         this.minSize = minSize;
@@ -39,9 +35,7 @@ public class Producer implements Runnable {
         this.nextSeq = startSeq;
         this.interval = interval;
         this.endOffset = endOffset;
-        this.stopped = stopped;
-        this.lock = lock;
-        this.condition = condition;
+        this.replica = replica;
     }
 
     @Override
@@ -49,46 +43,45 @@ public class Producer implements Runnable {
         log.info("Producer thread started");
         HashSet<Long> confirmOffset = new HashSet<Long>();
         this.previousTimestamp = System.currentTimeMillis();
+        HashSet<CompletableFuture<AppendResult>> futureSet = new HashSet<CompletableFuture<AppendResult>>();
         while (true) {
-            if (this.stopped.get()) {
+            if (isTerminated()) {
+                for (CompletableFuture<AppendResult> element : futureSet) {
+                    element.cancel(true);
+                }
                 return;
             }
             ByteBuffer buffer = Utils.getRecord(this.nextSeq, this.minSize, this.maxSize);
             CompletableFuture<AppendResult> cf = this.stream
                     .append(new DefaultRecordBatch(1, 0, Collections.emptyMap(),
                             buffer));
-            log.info("[" + stream.streamId() + "]Send a append request, seq: " + this.nextSeq);
+            futureSet.add(cf);
+            log.info("StreamID: " + stream.streamId() + "(" + this.replica + "), send a append request, seq: "
+                    + this.nextSeq);
             cf.whenComplete((result, e) -> {
+                if (isTerminated()) {
+                    return;
+                }
                 if (e == null) {
+                    futureSet.remove(cf);
                     long baseOffset = result.baseOffset();
                     confirmOffset.add(baseOffset + 1);
-                    log.info("[" + stream.streamId() + "]Append a record batch, seq: " +
+                    log.info("StreamID: " + stream.streamId() + "(" + this.replica + "), append a record batch, seq: " +
                             this.nextSeq
                             + ", offset:["
                             + baseOffset + ", " + (baseOffset + 1) + ")");
                 } else {
                     log.error(e);
-                    this.stopped.set(true);
-                    this.lock.lock();
-                    try {
-                        this.condition.signalAll();
-                    } finally {
-                        this.lock.unlock();
-                    }
+                    futureSet.remove(cf);
+                    terminate();
                 }
             });
             updateEndOffset(confirmOffset);
             long currentTimestamp = System.currentTimeMillis();
             long elapsedTime = currentTimestamp - previousTimestamp;
             if (elapsedTime > TIME_OUT) {
-                log.error("[" + stream.streamId() + "]Timeout");
-                this.stopped.set(true);
-                this.lock.lock();
-                try {
-                    this.condition.signalAll();
-                } finally {
-                    this.lock.unlock();
-                }
+                log.error("StreamID: " + stream.streamId() + "(" + this.replica + ")Append timeout");
+                terminate();
             }
             try {
                 Thread.sleep(this.interval);
@@ -109,5 +102,13 @@ public class Producer implements Runnable {
             this.previousTimestamp = System.currentTimeMillis();
             this.endOffset.set(offset);
         }
+    }
+
+    public void terminate() {
+        shouldTerminate = true;
+    }
+
+    public boolean isTerminated() {
+        return shouldTerminate;
     }
 }
