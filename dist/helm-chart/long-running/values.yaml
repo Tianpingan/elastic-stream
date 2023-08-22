@@ -5,8 +5,8 @@
 replicaCount: 1
 
 image:
-  repository: elasticstream/long-running
-  pullPolicy: IfNotPresent
+  repository: tianpingan/long-running
+  pullPolicy: Always
   # Overrides the image tag whose default is the chart appVersion.
   tag: "nightly"
 
@@ -23,7 +23,7 @@ longRunning:
   payloadSizeMax: 4096
 
 promtail:
-  promtailSidecar: false
+  promtailSidecar: true
   clientUrl: "http://loki:3100/loki/api/v1/push"
 
 resources: {}

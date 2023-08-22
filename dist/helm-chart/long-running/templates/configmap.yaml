@@ -21,3 +21,9 @@ data:
             pod: ${NAME}
             job: ${NAME}-client-log
             __path__: /logs/client.log
+        - targets:
+          - localhost
+          labels:
+            pod: ${NAME}
+            job: ${NAME}-error-log
+            __path__: /logs/longrunning/error.log

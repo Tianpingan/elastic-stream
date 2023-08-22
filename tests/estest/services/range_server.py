@@ -77,4 +77,9 @@ class RangeServer(Service):
 
     def clean_node(self, node):
         self.stop_node(node)
-        node.account.ssh("sudo rm -rf -- %s" % RangeServer.ROOT, allow_fail=False)
+        # self.kill_node(node)
+        node.account.ssh("sudo rm -rf -- %s" % RangeServer.ROOT, allow_fail=True)
+
+    def clean(self):
+        for node in self.nodes:
+            self.clean_node(node)
