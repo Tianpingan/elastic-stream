@@ -9,6 +9,8 @@ import com.automq.elasticstream.client.api.Stream;
 
 public class LongRunning {
     private static Logger log = Logger.getLogger(LongRunning.class.getClass());
+    // 10s
+    private static final long INTERVAL = 10 * 1000;
 
     public static void main(String[] args) {
         LongRunningOption option = new LongRunningOption();
@@ -50,7 +52,12 @@ public class LongRunning {
                         tailReadConsumerThread.join();
                         repeatedReadConsumerThread.join();
                     } catch (InterruptedException | ExecutionException e) {
-                        log.error(e);
+                        log.error("Fail to create stream: " + e.toString());
+                    }
+                    log.info("Restarting task...");
+                    try {
+                        Thread.sleep(INTERVAL);
+                    } catch (InterruptedException e) {
                     }
                 }
             });
