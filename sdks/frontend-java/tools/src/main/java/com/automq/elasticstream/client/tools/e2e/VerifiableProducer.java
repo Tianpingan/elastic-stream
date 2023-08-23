@@ -27,7 +27,7 @@ public class VerifiableProducer {
                         .get();
             }
         } catch (InterruptedException | ExecutionException e) {
-            System.out.println("Open error");
+            System.out.println("Open error: " + e.toString());
             return;
         }
         for (long i = option.getStartSeq(); i < option.getCount(); i++) {
@@ -37,9 +37,9 @@ public class VerifiableProducer {
                         .append(new DefaultRecordBatch(1, 0, Collections.emptyMap(),
                                 buffer))
                         .get();
-                System.out.println("offset: " + result.baseOffset());
+                // System.out.println("offset: " + result.baseOffset());
             } catch (InterruptedException | ExecutionException e) {
-                System.out.println("Append error");
+                System.out.println("Append error: " + e.toString());
                 return;
             }
         }

@@ -64,7 +64,8 @@ class PD(Service):
 
     def pids(self, node):
         try:
-            cmd = "ps -a | grep pd | awk '{print $1}'"
+            # cmd = "ps -ax | grep pd | awk '{print $1}'"
+            cmd = "pgrep pd"
             pid_arr = [pid for pid in node.account.ssh_capture(cmd, allow_fail=True, callback=int)]
             return pid_arr
         except (RemoteCommandError, ValueError) as e:
@@ -88,6 +89,7 @@ class PD(Service):
     def signal_node(self, node, sig=signal.SIGTERM):
         pids = self.pids(node)
         for pid in pids:
+            # print("Kill pid: ", pid)
             node.account.signal(pid, sig)
 
     def clean(self):

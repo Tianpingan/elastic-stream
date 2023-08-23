@@ -19,7 +19,7 @@ public class VerifiableConsumer {
             stream = client.streamClient()
                     .openStream(option.getStreamId(), OpenStreamOptions.newBuilder().build()).get();
         } catch (InterruptedException | ExecutionException e) {
-            System.out.println("Open error");
+            System.out.println("Open error: " + e.toString());
             return;
         }
         for (long i = option.getStartSeq(); i < option.getCount(); i++) {
@@ -27,18 +27,18 @@ public class VerifiableConsumer {
                 FetchResult fetchResult = stream.fetch(i, i + 1, Integer.MAX_VALUE).get();
                 List<RecordBatchWithContext> recordBatch = fetchResult.recordBatchList();
                 if (recordBatch.size() != 1) {
-                    System.out.println("Fetch error");
+                    System.out.println("Fetch error: wrong size");
                     return;
                 }
                 RecordBatchWithContext record = recordBatch.get(0);
                 byte[] rawPayload = new byte[record.rawPayload().remaining()];
                 record.rawPayload().get(rawPayload);
                 if (Utils.checkRecord(i, ByteBuffer.wrap(rawPayload)) == false) {
-                    System.out.println("Fetch error");
+                    System.out.println("Fetch error: Corrupted");
                     return;
                 }
             } catch (InterruptedException | ExecutionException e) {
-                System.out.println("Fetch error");
+                System.out.println("Fetch error: " + e.toString());
                 return;
             }
         }
