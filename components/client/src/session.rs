@@ -115,8 +115,11 @@ impl Session {
                                 // Close the session
                                 if let Some(sessions) = sessions.upgrade() {
                                     let mut sessions = sessions.borrow_mut();
-                                    if let Some(_session) = sessions.remove(&target) {
+                                    if let Some(session) = sessions.remove(&target) {
                                         warn!( "Closing session to {}", target);
+                                        if let Err(e) = session.connection.close() {
+                                            error!("Failed to close connection. Cause: {:?}", e);
+                                        }
                                     }
                                 }
                                 break;
@@ -140,8 +143,11 @@ impl Session {
                                 info!( "Connection to {} is closed by peer", target);
                                 if let Some(sessions) = sessions.upgrade() {
                                     let mut sessions = sessions.borrow_mut();
-                                    if let Some(_session) = sessions.remove(&target) {
+                                    if let Some(session) = sessions.remove(&target) {
                                         info!( "Remove session to {} from composite-session", target);
+                                        if let Err(e) = session.connection.close() {
+                                            error!("Failed to close connection. Cause: {:?}", e);
+                                        }
                                     }
                                 }
                                 break;
