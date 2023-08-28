@@ -51,6 +51,7 @@ public class LongRunning {
                         producerThread.join();
                         tailReadConsumerThread.join();
                         repeatedReadConsumerThread.join();
+                        stream.close();
                     } catch (InterruptedException | ExecutionException e) {
                         log.error("Fail to create stream: " + e.toString());
                     }

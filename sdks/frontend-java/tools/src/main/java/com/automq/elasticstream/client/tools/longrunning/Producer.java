@@ -80,7 +80,7 @@ public class Producer implements Runnable {
             long currentTimestamp = System.currentTimeMillis();
             long elapsedTime = currentTimestamp - previousTimestamp;
             if (elapsedTime > TIME_OUT) {
-                log.error("StreamID: " + stream.streamId() + "(" + this.replica + ")Append timeout");
+                log.error("Append timeout");
                 terminate();
             }
             try {
