@@ -10,6 +10,7 @@ import com.automq.elasticstream.client.api.Stream;
 
 public class LongRunning {
     private static Logger log = Logger.getLogger(LongRunning.class.getClass());
+    // 10s
     private static final long INTERVAL = 10 * 1000;
     private static final long RECORDS_COUNT = 64;
 
