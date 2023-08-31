@@ -16,13 +16,13 @@ public class TrimAndDeleteTest {
                 .createAndOpenStream(CreateStreamOptions.newBuilder().epoch(0)
                         .replicaCount(option.getReplica()).build())
                 .get();
-        // 1. 获取已经trim掉的记录
+
         assertTrue(Utils.appendRecords(stream0, 0, option.getCount(), 1));
         assertTrue(Utils.fetchRecords(stream0, 0, option.getCount() / 2, 1));
         stream0.trim(option.getCount() / 2).get();
         assertFalse(Utils.fetchRecords(stream0, 0, option.getCount() / 2, 1));
         stream0.close().get();
-        // 2. 发送数据到已删除 Stream
+
         Stream stream1 = client.streamClient()
                 .createAndOpenStream(CreateStreamOptions.newBuilder().epoch(0)
                         .replicaCount(option.getReplica()).build())

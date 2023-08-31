@@ -17,15 +17,15 @@ public class FetchTest {
         E2EOption option = new E2EOption();
         Client client = Client.builder().endpoint(option.getEndPoint()).kvEndpoint(option.getKvEndPoint())
                 .build();
-        // 1. 获取和重复获取一批数据
+
         Stream stream0 = client.streamClient()
                 .createAndOpenStream(CreateStreamOptions.newBuilder().epoch(0)
                         .replicaCount(option.getReplica()).build())
                 .get();
         assertTrue(Utils.appendRecords(stream0, 0, option.getCount(), option.getBatchSize()));
-        // 获取方式a：one by one
+
         assertTrue(Utils.fetchRecords(stream0, 0, option.getCount(), option.getBatchSize()));
-        // 获取方式b：all in one
+
         FetchResult fetchResult = stream0.fetch(0, option.getCount() * option.getBatchSize(), Integer.MAX_VALUE)
                 .get();
         int len = fetchResult.recordBatchList().size();
@@ -40,7 +40,7 @@ public class FetchTest {
             assertTrue(String.format("hello world %03d", i).equals(payloadStr));
         }
         stream0.close().get();
-        // 2. 准备 Stream 和一个大批数据 从批中间读取部分数据
+
         Stream stream1 = client.streamClient()
                 .createAndOpenStream(CreateStreamOptions.newBuilder().epoch(0)
                         .replicaCount(1).build())
