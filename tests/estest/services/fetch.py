@@ -22,16 +22,17 @@ class Fetch(Service):
         self.start_node(node)
 
     def start_node(self, node):
-        idx = self.idx(node)
-        self.logger.info("Starting Fetch node %d on %s", idx, node.account.hostname)
-        node.account.ssh("mkdir -p %s" % Fetch.ROOT)
-        cmd = self.start_cmd(node)
-        output = node.account.ssh_output(cmd, allow_fail=True).decode('utf-8')
-        print (output)
-        if "PASS" in output:
-            pass
-        else:
-            raise Exception("Test Failed")
+        self.start_and_wait(node)
+        # idx = self.idx(node)
+        # self.logger.info("Starting Fetch node %d on %s", idx, node.account.hostname)
+        # node.account.ssh("mkdir -p %s" % Fetch.ROOT)
+        # cmd = self.start_cmd(node)
+        # output = node.account.ssh_output(cmd, allow_fail=True).decode('utf-8')
+        # print (output)
+        # if "PASS" in output:
+        #     pass
+        # else:
+        #     raise Exception("Test Failed")
 
     def start_cmd(self, node):
         cmd = "cd " + Fetch.ROOT + ";"
@@ -74,3 +75,16 @@ class Fetch(Service):
     def clean_node(self, node):
         self.stop_node(node)
         node.account.ssh("sudo rm -rf -- %s" % Fetch.ROOT, allow_fail=False)
+
+    def start_and_return_immediately(self, node):
+        idx = self.idx(node)
+        self.logger.info("Starting Fetch node %d on %s", idx, node.account.hostname)
+        node.account.ssh("mkdir -p %s" % Fetch.ROOT)
+        cmd = self.start_cmd(node)
+        cmd += " > " + self.ROOT + "/output.log"
+        node.account.ssh(cmd, allow_fail=True)
+
+    def start_and_wait(self, node):
+        with node.account.monitor_log(self.ROOT + "/output.log") as monitor:
+            self.start_and_return_immediately(node)
+            monitor.wait_until("PASS", timeout_sec=300, err_msg="Test timeout")

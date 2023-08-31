@@ -10,8 +10,6 @@ import com.automq.elasticstream.client.api.OpenStreamOptions;
 import com.automq.elasticstream.client.api.RecordBatchWithContext;
 import com.automq.elasticstream.client.api.Stream;
 
-import static org.junit.Assert.assertEquals;
-
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.zip.CRC32;
@@ -95,7 +93,6 @@ public class Utils {
         try {
             return latch.await(10, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            // TODO Auto-generated catch block
             e.printStackTrace();
         }
         return false;
@@ -116,38 +113,15 @@ public class Utils {
                         latch.countDown();
                     }
                 }
-
             });
         }
         try {
             return latch.await(10, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            // TODO Auto-generated catch block
             e.printStackTrace();
         }
         return false;
     }
-    // public static boolean appendRecords(Stream stream, long startIndex, long
-    // count, int batchSize) {
-    // for (long i = startIndex; i < startIndex + count; i++) {
-    // long index = i;
-    // byte[] payload = String.format("hello world %03d",
-    // i).getBytes(StandardCharsets.UTF_8);
-    // ByteBuffer buffer = ByteBuffer.wrap(payload);
-    // try {
-    // AppendResult result = stream
-    // .append(new DefaultRecordBatch(batchSize, 0, Collections.emptyMap(), buffer))
-    // .get();
-    // long offset = result.baseOffset();
-    // if (index * batchSize != offset) {
-    // return false;
-    // }
-    // } catch (ExecutionException | InterruptedException e) {
-    // return false;
-    // }
-    // }
-    // return true;
-    // }
 
     public static boolean fetchRecords(Stream stream, long startIndex, long count, int batchSize) {
         for (long i = startIndex; i < startIndex + count; i++) {
@@ -159,9 +133,6 @@ public class Utils {
                 return false;
             }
             if (1 != fetchResult.recordBatchList().size()) {
-                // log.error(
-                // "Expected record batch list size: " + 1 + ", but get: " +
-                // fetchResult.recordBatchList().size());
                 return false;
             }
             RecordBatchWithContext recordBatch = fetchResult.recordBatchList().get(0);
