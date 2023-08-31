@@ -15,7 +15,7 @@ public class MetadataTest {
         assertEquals(Utils.openStream(client, 0, OpenStreamOptions.newBuilder().build()), null);
         assertEquals(Utils.openStream(client, Long.MAX_VALUE, OpenStreamOptions.newBuilder().build()), null);
 
-        // Create stream and check its stream id
+        // 1. Create stream and check its stream id
         for (int i = 0; i < option.getCount(); i++) {
             Stream stream = client.streamClient()
                     .createAndOpenStream(CreateStreamOptions.newBuilder().replicaCount(option.getReplica()).build())
@@ -23,7 +23,7 @@ public class MetadataTest {
             assertEquals(stream.streamId(), i);
             stream.close();
         }
-        // Reopen stream and check its stream id
+        // 2. Reopen stream and check its stream id
         for (long i = 0; i < option.getCount(); i++) {
             Stream stream = client.streamClient().openStream(i, OpenStreamOptions.newBuilder().build()).get();
             assertEquals(stream.streamId(), i);
